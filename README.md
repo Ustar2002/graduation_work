@@ -140,5 +140,5 @@ pandas로 읽어(`dtype=str, keep_default_na=False` 뒤 수동 변환) 행 키 �
 
 ## 9. 마일스톤 상태
 
-- **M1 (수직 슬라이스) — 더미 파이프라인 검증 완료, 실제 호출 대기.** 설계 계약 v2.1(`docs/harness_design.md`), 설정·과제·프롬프트·전 모듈(`generate`/`extract`/`build`/`classify`/`worker`/`run`/`aggregate`)과 더미 응답·단위 테스트 완료. **2026-11-04 `make dummy RUN_ID=dummy-m1`(numpy/3·4는 `dummy-m1x`로 n≥5 보강)로 끝까지 검증**: 11개 더미 변형이 모두 기대표(`docs/error_taxonomy.md` §8)와 일치, 단위 테스트 120개 통과(당시; 리뷰 반영 후 현재 153개), 같은 `RUN_ID` 재실행은 `raw_sha256` 일치로 전부 건너뛰고(멱등) `--force` 재실행·프로세스 정리도 확인, `analysis.aggregate`가 pass율·중앙값 속도비를 출력했다. 검증 머신은 거버너 `powersave`(EPP `performance`)여서 모든 행이 `protocol_ok=0`(`governor=powersave`)이었다 — 실제 측정 전에 §2의 거버너 설정이 필요하다. **남은 M1 단계는 하나**: §8의 조건이 확정됐으므로(2026-11-05) `ANTHROPIC_API_KEY`만 준비되면 `make real`로 실제 API 호출 3샘플 × 3언어 = 9회를 실행하고 `results/runs.csv`를 쌓는다.
+- **M1 (수직 슬라이스) — 완료(2026-11-05).** 더미 파이프라인 검증(11개 변형 일치, 단위 테스트 164개) 뒤 첫 실제 실행 `20261105-real`: `claude-sonnet-5-5` 9회 호출 모두 pass, 속도비 중앙값 numpy 1.01 / c_openmp 0.97 / c_seq 0.33, 비용 약 0.21달러. 관찰과 후속 제안은 `docs/decisions.md` "M1 완료" 절.
 - M2 과제 확장(stencil2d, spmv_csr, n=5) → M3 언어 확장(numba, halide, rust) → M4 마이크로 조건·수정 루프 → M5 perf_summary·ASan/UBSan·린트 → M6 분석·그래프·부트스트랩 CI·대시보드 → M7 확장(LLVM IR/asm, 보드). M1이 끝나기 전에는 만들지 않는다(CLAUDE.md 원칙 2).
