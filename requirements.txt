@@ -1,0 +1,9 @@
+# 하네스 런타임. Python 3.14. 반드시 격리된 venv(.venv, 시스템 site-packages 미사용)에 설치한다:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# 시스템 python3-numpy는 참조 BLAS(netlib libblas3)에 링크돼 있어 1024^3 GEMM이 ~250 ms다.
+# pip 휠의 numpy는 OpenBLAS(scipy-openblas)를 내장해 같은 연산이 4스레드 ~15 ms → CLAUDE.md의 "NumPy(OpenBLAS)" 기준선은 이 휠이어야 성립한다.
+numpy==2.3.5
+pyyaml>=6.0,<7
+pandas>=3.0,<4
+anthropic>=2.4,<3      # SDK 2.x: messages.create 에 temperature 키워드 없음(extra_body 경유), httpx2 기반
+openai>=3.0,<4         # OpenAI 호환 엔드포인트(오픈 모델) 폴백 전용

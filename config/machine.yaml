@@ -1,0 +1,129 @@
+# harness.protocol --probe --write 가 생성한 파일. 손으로 고치지 말고 다시 프로브하라.
+probed_at: '2026-11-04T11:03:23+09:00'
+hostname: ustar-Zenbook-UX3402ZA-UX3402ZA
+os: Ubuntu 26.04.1 LTS
+kernel: 7.0.0-38-generic
+glibc: '2.43'
+cpu_model: 12th Gen Intel(R) Core(TM) i7-1260P
+sockets: 1
+physical_cores: 12
+logical_cpus: 16
+smt: true
+p_core_cpus:
+- 0
+- 1
+- 2
+- 3
+- 4
+- 5
+- 6
+- 7
+e_core_cpus:
+- 8
+- 9
+- 10
+- 11
+- 12
+- 13
+- 14
+- 15
+thread_siblings:
+  0:
+  - 0
+  - 1
+  1:
+  - 0
+  - 1
+  2:
+  - 2
+  - 3
+  3:
+  - 2
+  - 3
+  4:
+  - 4
+  - 5
+  5:
+  - 4
+  - 5
+  6:
+  - 6
+  - 7
+  7:
+  - 6
+  - 7
+  8:
+  - 8
+  9:
+  - 9
+  10:
+  - 10
+  11:
+  - 11
+  12:
+  - 12
+  13:
+  - 13
+  14:
+  - 14
+  15:
+  - 15
+isa:
+- sse2
+- ssse3
+- sse4_1
+- sse4_2
+- avx
+- avx2
+- fma
+- f16c
+- bmi1
+- bmi2
+- avx_vnni
+caches:
+  L1d:
+    size: 48K
+    shared_cpu_list: 0-1
+  L1i:
+    size: 32K
+    shared_cpu_list: 0-1
+  L2:
+    size: 1280K
+    shared_cpu_list: 0-1
+  L3:
+    size: 18432K
+    shared_cpu_list: 0-15
+  measured_on: cpu0
+memory_gb: 14.5
+governor: powersave
+governor_available:
+- performance
+- powersave
+epp: performance
+no_turbo: 0
+scaling_driver: intel_pstate
+taskset_available: true
+cpupower_available: true
+sudo_nopasswd: false
+apport_core_pattern: true
+compilers:
+  gcc: gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+  clang: Ubuntu clang version 21.1.8 (6ubuntu1)
+  openmp_gcc: true
+  openmp_clang: false
+march_resolved: -march=alderlake -mtune=alderlake
+python_exe: /home/ustar/dev/graduate_project/.venv/bin/python
+python_version: 3.14.4
+numpy_version: 2.3.5
+numpy_blas:
+  name: scipy-openblas
+  version: 0.3.30
+  config: OpenBLAS 0.3.30  USE64BITINT DYNAMIC_ARCH NO_AFFINITY Haswell MAX_THREADS=64
+  loaded_lib: /home/ustar/dev/graduate_project/.venv/lib/python3.14/site-packages/numpy.libs/libscipy_openblas64_-fdde5778.so
+sdk_versions:
+  anthropic: 2.4.0
+  openai: 3.44.0
+bandwidth_gbs: null
+peak_gflops: null
+notes: 'hybrid CPU: P-cores 0-7 (SMT pairs), E-cores 8-15; measure on P-cores only; governor=powersave: fix with `sudo cpupower
+  frequency-set -g performance`; apport core_pattern active: worker sets PR_SET_DUMPABLE=0'

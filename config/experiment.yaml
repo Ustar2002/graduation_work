@@ -1,0 +1,69 @@
+run:
+  tasks: [gemm]
+  languages: [numpy, c_seq, c_openmp]
+  n_samples: 3                 # M1=3, M2부터 5
+  max_repair_turns: 0          # M1=0 (설계 상한 3; M4)
+  conditions:
+    args: positional           # positional | keyword   (keyword는 M4)
+    grammar_hint: "off"        # on | off               (M4)
+    feedback: compiler         # compiler | compiler+lint (M4)
+
+model:
+  provider: anthropic          # anthropic | openai_compat | dummy   (env LLM_PROVIDER 가 덮어씀)
+  name: claude-sonnet-5-5      # env LLM_MODEL 이 덮어씀. 2026-11-05 확정: Max 구독의 월 API 크레딧 안에서 전체 실험을 한 모델로 유지하기 위함(decisions.md)
+  max_tokens: 32000            # thinking 토큰 포함 상한. 스트리밍으로 보내므로 SDK 비스트리밍 가드(≈21k) 무관
+  temperature: null            # Claude 4.7 이후·5.x는 temperature/top_p/top_k를 400으로 거부 → null = 보내지 않음(제공자 기본 샘플링).
+                               # non-null이면 anthropic은 extra_body로만 전송(4.6 이하 전용), openai_compat은 그대로 전송.
+  seed: null                   # Anthropic Messages API에는 seed가 없다. openai_compat에서만 전달(정수).
+  request_timeout_s: 600       # 스트리밍에서는 이벤트 간 read timeout. max_retries는 타임아웃에도 적용됨(SDK)
+  max_retries: 3
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    effort: medium             # output_config.effort (low|medium|high|xhigh|max). null 금지(서버 기본값에 조용히 의존하지 않기 위해)
+    thinking: adaptive         # 항상 명시 전송 {"type":"adaptive"} (Opus 5.5는 끌 수 없음; 4.7/4.8도 같은 조건이 되게)
+  openai_compat:
+    api_key_env: OPENAI_API_KEY      # ANTHROPIC_ 접두 금지(키 유출 방지; 로더가 거부)
+    base_url_env: LLM_BASE_URL       # 없으면 실패
+    max_tokens_param: max_tokens     # max_tokens | max_completion_tokens
+
+languages:
+  numpy:    {backend: python, prompt: prompts/lang/numpy.md,    threads: measurement}
+  c_seq:    {backend: c,      prompt: prompts/lang/c_seq.md,    openmp: false, threads: 1}
+  c_openmp: {backend: c,      prompt: prompts/lang/c_openmp.md, openmp: true,  threads: measurement}
+
+build:
+  cc: gcc
+  cflags: ["-O3", "-march=native"]                   # 성능 결정 플래그. 프롬프트에 공개.
+  base_flags: ["-std=gnu11", "-fPIC", "-shared", "-Wall", "-fno-semantic-interposition"]
+  openmp_flag: "-fopenmp"
+  ldflags: ["-lm", "-Wl,--no-undefined"]             # 미정의 심벌은 빌드 단계 compile_error
+  diag_flags: ["-fopt-info-vec-optimized", "-fopt-info-vec-missed"]   # 코드 생성 무관; build.log에 저장(M5 입력)
+  compile_timeout_s: 60
+  forbidden_symbols: ["pthread_create", "clone", "fork", "vfork", "system", "popen", "execve", "execv", "execl"]
+  thread_symbols_prefix: ["pthread_create", "GOMP_", "omp_", "__kmpc_"]   # c_seq에서 검출 시 contract_violation
+
+measurement:
+  cores: "0,2,4,6"             # taskset -c (P-core 4개, SMT 형제 제외)
+  single_core: "2"             # threads==1 언어의 taskset (cpu0은 IRQ가 몰려 회피)
+  threads: 4                   # OMP_NUM_THREADS / OPENBLAS_NUM_THREADS / MKL_NUM_THREADS
+  omp_env_extra: {OMP_PROC_BIND: "true", OMP_PLACES: "cores", OMP_DYNAMIC: "false"}   # OpenMP 백엔드 워커에만
+  warmup: 3
+  repeats: 10
+  min_repeats: 3               # 느린 커널에서 예산 안에 맞추려 줄일 때의 하한 (repeats_reduced=1 플래그)
+  check_repeats: 2             # 정확성 테스트마다 호출 횟수 (실행 간 불일치 = race 탐지)
+  check_timeout_s: 180
+  bench_timeout_s: 300
+  max_worker_mem_gb: 8         # RLIMIT_AS
+  max_load_1m: 2.0
+  max_pinned_busy_pct: 10.0    # 고정 코어·형제 코어의 사전 사용률(1초 샘플)
+  require_performance_governor: true   # 아니면 경고 + governor_ok=0 (실험은 계속; --strict-protocol이면 중단)
+  baseline_min_gflops: 30      # 기준선이 이보다 느리면 BLAS 정체 의심 → 중단
+  baseline_drift_pct_max: 10   # 대응 기준선이 run 시작 기준선과 이만큼 다르면 플래그(기록만; --strict-protocol 무관)
+  correctness_tests: [tiny, rect, small]
+  performance_test: large
+
+paths:
+  results_csv: results/runs.csv
+  results_csv_dummy: results/runs_dummy.csv   # provider == dummy 인 run의 행은 여기로
+  raw_dir: results/raw
+  built_dir: results/built

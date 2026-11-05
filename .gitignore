@@ -1,0 +1,19 @@
+# 실험 산출물: 원문·빌드 결과는 크다 → git에는 runs.csv만 올린다
+results/raw/*
+results/built/*
+!results/raw/.gitkeep
+!results/built/.gitkeep
+# 시드 고정 테스트 입력은 gen_tests.py로 재생성한다
+tasks/*/tests/*.npz
+tasks/*/tests/manifest.json
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+.pytest_cache/
+# 편집기·OS
+.vscode/
+.idea/
+.DS_Store

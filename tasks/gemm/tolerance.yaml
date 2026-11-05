@@ -1,0 +1,8 @@
+# gemm 과제 허용오차 (docs/harness_design.md §3). 비교식: |out − ref| ≤ atol + rtol·|ref| (ref는 float64 누적).
+task: gemm
+dtype: float32
+rtol: 1.0e-3
+atol: 1.0e-3                  # 입력 uniform[-1,1)에서 |C|~10; 0 근처 원소 보호. CLAUDE.md는 rtol만 명시 → decisions.md
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20  # §10: 모든 원소가 허용오차의 20배 이내로 틀리면 numeric_instability(imprecise), 아니면 wrong_output
+sentinel: -2048.0              # §8: C 사전 채움값. |C| ≤ K ≤ 1024 이므로 정당한 출력이 될 수 없음

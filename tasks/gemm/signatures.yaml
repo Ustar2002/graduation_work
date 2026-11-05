@@ -1,0 +1,19 @@
+# gemm 과제 언어별 함수 시그니처 (docs/harness_design.md §3).
+# positional: M1 기본. keyword: M4 (args=keyword 조건). harness/extract.py가 이 목록으로 시그니처를 검사한다.
+task: gemm
+function: gemm
+params: [A, B, C, M, N, K]
+languages:
+  numpy:
+    positional: "def gemm(A, B, C, M, N, K):"
+    keyword:    "def gemm(*, A, B, C, M, N, K):"
+    types: {A: "numpy.ndarray float32 shape (M, K), C-contiguous, 64-byte aligned, read-only", B: "numpy.ndarray float32 shape (K, N)", C: "numpy.ndarray float32 shape (M, N), output", M: int, N: int, K: int}
+    returns: "None (results are written into C)"
+  c_seq:
+    positional: "void gemm(const float* A, const float* B, float* C, int M, int N, int K)"
+    keyword: null        # M4: 매개변수 구조체
+    indexing: "A[i*K + k], B[k*N + j], C[i*N + j]"
+  c_openmp:              # c_seq와 동일
+    positional: "void gemm(const float* A, const float* B, float* C, int M, int N, int K)"
+    keyword: null        # M4: 매개변수 구조체
+    indexing: "A[i*K + k], B[k*N + j], C[i*N + j]"
