@@ -75,7 +75,7 @@ llm-lang-hpc/
 
 3. 마일스톤 (순서대로, 각 단계 끝에 결과를 보여주고 멈춘다)
 M1 — 수직 슬라이스 (최우선). GEMM 하나, 언어 `numpy`·`c_seq`·`c_openmp`, 모델 1개, `n=3`. 생성→추출→빌드→실행→정확성→시간→CSV까지. 결과 `results/runs.csv`에 행이 쌓이고 `analysis/aggregate.py`가 pass율·중앙값 속도비를 출력하면 완료. 이 단계에서 측정 규약(`protocol.py`)과 오류 분류를 함께 완성한다.
-M2 — 과제 확장. `stencil2d`, `spmv_csr` 추가. 각 과제에 참조·테스트·기준선·허용오차. `n=5`.
+M2 — 과제 확장(2026-11-05 갱신). 커널 12개를 3단계로 넣는다(§4 표). M2a = Tier 1(`gemm`, `jacobi2d`, `spmv_csr`, `dot`), M2b = Tier 2, M2c = Tier 3. 각 과제에 참조·테스트·기준선·허용오차. `n=5`. 앞 단계 결과를 보고 다음 단계를 넣는다(원칙 1).
 M3 — 언어 확장. `numba`(타입 명시 강제: 프롬프트에 서명 타입 요구, 빌드 단계에서 `@njit` 시그니처 검사), `halide_auto`/`halide_manual`(pip `halide`; 오토스케줄러 플러그인 로드 확인; 실패 시 `docs/decisions.md`에 기록하고 CPU 타깃만). `rust`는 툴체인 확인 후.
 M4 — 마이크로 조건. `args=keyword`(Python/Numba 키워드 전용 시그니처, C는 매개변수 구조체), `grammar_hint`, `feedback=compiler+lint`(§6 플러그인 연결), 수정 루프.
 M5 — 성능 결정 요약 + 안전성. `perf_summary.py`, `safety.py`(ASan/UBSan), 린트 플러그인 호출. 결과 열 채움.
@@ -87,6 +87,19 @@ M7 — 확장(시간 남을 때만). `llvm_ir`/`aarch64_asm` 직접 생성 vs C 
 * gemm: `C[M×N] = A[M×K] · B[K×N]`. small 256³, large 1024³ (머신에 맞춰 조정). 기준선: NumPy(OpenBLAS) `A @ B`. C 시그니처 `void gemm(const float* A, const float* B, float* C, int M, int N, int K)`; 키워드 버전은 Python에서 `gemm(*, A, B, M, N, K)`.
 * stencil2d: 5-point Jacobi 1회 반복, 경계는 그대로 복사. `out[y][x] = 0.25*(in[y-1][x]+in[y+1][x]+in[y][x-1]+in[y][x+1])`. small 512², large 4096². 기준선: 손 구현 C+OpenMP(`baseline/`에 포함, 벡터화 확인).
 * spmv_csr: `y = A·x`, A는 CSR(`row_ptr`, `col_idx`, `vals`). small 10⁴행/밀도 1e-3, large 10⁶행. 기준선: `scipy.sparse` 또는 손 구현 C+OpenMP.
+
+커널 세트(2026-11-05 확정, 교수님 피드백 반영). 선정 기준: 하드웨어 고정 · 모든 언어에서 구현 가능 · 명세만으로 생성 가능한 크기(함수 1~3개) · 정답 자동 검증 · 성능 특성 다양 · 난이도 사다리.
+
+| Tier | 커널 | 병목 | LLM이 내려야 하는 성능 결정 |
+|---|---|---|---|
+| 1 | `gemm` (1024³) | compute | 루프 순서·타일링·벡터화 |
+| 1 | `jacobi2d` (4096², T=20) | memory | 배열 교환, 경계 처리, 병렬 for |
+| 1 | `spmv_csr` (10⁶행) | 불규칙 memory | 행 분할, 간접 참조 |
+| 1 | `dot` (2²⁵) | bandwidth | reduction 병렬화, 누적 정밀도 |
+| 2 | histogram · prefix scan · n-body O(n²) · sort | atomics / 알고리즘 재구성 / compute / 알고리즘 선택 | private histogram, 2-pass 스캔, SoA·rsqrt, radix/merge |
+| 3 | LU 또는 Cholesky · Floyd–Warshall · BFS · FFT | 의존성·불규칙 | 병렬 가능한 루프 판별, 프론티어 병렬화, bit-reversal |
+
+Tier 1의 구체 계약(시그니처·크기·허용오차)은 `tasks/<task>/`와 `docs/decisions.md`가 기준이다. 위 `stencil2d` 항목은 `jacobi2d`(T 스텝)로 대체됐다. Tier 2·3의 정수 출력(histogram, sort, BFS)과 Halide로 표현하기 어려운 커널의 처리는 해당 단계 시작 때 정한다.
 
 각 `spec.md`는 LLM에 그대로 들어가는 문장이므로 모호함 없이 쓰고, 언어 중립적으로 쓴다(특정 라이브러리 사용 지시 금지 — 라이브러리 사용 여부 자체가 관찰 대상).
 5. 성능 결정 요약 (`perf_summary.py`) — 출력 스키마
@@ -127,6 +140,7 @@ json
 ```
 
 범주 정의(변경 시 `docs/error_taxonomy.md` 갱신): `memory`(경계·초기화·별칭), `numeric`(NaN/Inf 위험, 정수 오버플로, 누적 정밀도, 부동소수 비교), `concurrency`(병렬 영역 내 공유 쓰기, 리덕션 누락, 비결정성), `shape_dtype`(차원·브로드캐스트·dtype 암묵 변환), `api_misuse`(시그니처 위반, 입력 변형, 전역 상태), `performance`(배열 원소 Python 루프, 불필요한 복사, 비연속 접근 — 안전성은 아니지만 같은 도구로 뽑는 성능 냄새).
+린트 타임라인(2026-11-05): M1·M2는 플러그인 없이 진행(빈 결과). M3·M4에서 `feedback=compiler+lint` 조건을 만들 때 기성 린터(clang-tidy/cppcheck, ruff/pyflakes)를 이 계약으로 감싼 베이스라인을 먼저 쓴다. 인지프 ML lint는 필요해지는 시점에 구현해 같은 CLI로 교체한다(마감 연동 없음). 하네스가 쌓는 실패 커널과 오류 라벨은 린트의 학습·평가 데이터로 내보낸다.
 하네스에서의 쓰임: (1) `lint_findings_*` 열, (2) `feedback=compiler+lint` 조건에서 수정 프롬프트에 `findings[].message`를 넣는다. 플러그인이 없으면 빈 결과로 진행하고 경고만 남긴다(실험이 막히면 안 된다).
 7. 시작할 때 사용자에게 확인할 것 (한 번에 물어라)
 

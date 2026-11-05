@@ -1,7 +1,7 @@
 run:
-  tasks: [gemm]
+  tasks: [gemm, jacobi2d, spmv_csr, dot]
   languages: [numpy, c_seq, c_openmp]
-  n_samples: 3                 # M1=3, M2부터 5
+  n_samples: 5                 # M1=3, M2부터 5 (CLAUDE.md §1)
   max_repair_turns: 0          # M1=0 (설계 상한 3; M4)
   conditions:
     args: positional           # positional | keyword   (keyword는 M4)

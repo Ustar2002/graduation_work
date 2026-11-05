@@ -1,0 +1,8 @@
+# jacobi2d 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float64 로 T 스텝).
+task: jacobi2d
+dtype: float32
+rtol: 1.0e-5                   # CLAUDE.md §4: 스텐실 1e-5. 값이 [0,1) 이고 평균 연산은 오차를 키우지 않아 float32 로 충분
+atol: 1.0e-6
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20
+sentinel: -2048.0              # 출력 사전 채움값. 출력은 [0, 1) 안이므로 정당한 값이 될 수 없음

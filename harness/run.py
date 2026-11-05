@@ -51,6 +51,7 @@ from harness.paths import (
 from harness.procutil import ProcResult, install_terminate_handlers, run_isolated
 from harness.protocol import StaticStatus, now_iso
 from harness.schema import RunRow, harness_version, rebuild_csvs, upsert_row
+from harness.taskspec import TaskSpec, load_taskspec
 
 _LOG = "[run]"
 
@@ -93,6 +94,8 @@ class TaskContext:
     manifest: dict[str, Any]
     tolerance_path: Path
     signatures: dict[str, Any]
+    spec: TaskSpec
+    baseline_artifact: Path | None = None  # C 기준선은 run 당 한 번 빌드한 .so
     baseline_run: dict[str, Any] | None = None
     baseline_1t: dict[str, Any] | None = None
 
@@ -229,6 +232,7 @@ def run_worker(
     mode: str,
     tests: list[Path],
     tolerance: Path,
+    signatures: Path,
     out_path: Path,
     cwd: Path,
     timeout_s: float,
@@ -238,7 +242,7 @@ def run_worker(
     """``taskset`` 접두 + 화이트리스트 환경으로 ``harness.worker`` 를 띄운다. stdout/stderr 는 ``<cwd>/<stage>.*.log``."""
     cmd = [*protocol.launch_prefix(cfg, threads), str(PYTHON_EXE), "-m", "harness.worker",
            "--backend", backend, "--artifact", str(artifact), "--mode", mode,
-           "--tolerance", str(tolerance), "--out", str(out_path), "--args-mode", args_mode,
+           "--tolerance", str(tolerance), "--signatures", str(signatures), "--out", str(out_path), "--args-mode", args_mode,
            "--max-mem-gb", str(cfg.measurement.max_worker_mem_gb)]
     if tests:
         cmd += ["--tests", ",".join(str(t) for t in tests)]
@@ -304,8 +308,8 @@ def signature_spec_for(signatures: dict[str, Any], language: str) -> dict[str, A
     return spec
 
 
-def baseline_gate(doc: dict[str, Any] | None, min_gflops: float | None) -> tuple[bool, str]:
-    """기준선 bench 결과가 쓸 만한가: 완료 ∧ final_check pass ∧ (gflops 하한) ∧ OpenBLAS."""
+def baseline_gate(doc: dict[str, Any] | None, min_gflops: float | None, *, require_openblas: bool = True) -> tuple[bool, str]:
+    """기준선 bench 결과가 쓸 만한가: 완료 ∧ final_check pass ∧ (gflops 하한) ∧ (python 기준선이면 OpenBLAS)."""
     if not doc:
         return False, "결과 문서 없음"
     if not doc.get("complete"):
@@ -316,29 +320,58 @@ def baseline_gate(doc: dict[str, Any] | None, min_gflops: float | None) -> tuple
     gflops = doc.get("gflops")
     if min_gflops is not None and (gflops is None or gflops < min_gflops):
         return False, f"gflops={gflops} < baseline_min_gflops={min_gflops:g}"
-    name = str((doc.get("blas") or {}).get("name") or "")
-    if "openblas" not in name.lower():
-        return False, f"worker BLAS={name or 'unknown'} (OpenBLAS 아님)"
+    if require_openblas:
+        name = str((doc.get("blas") or {}).get("name") or "")
+        if "openblas" not in name.lower():
+            return False, f"worker BLAS={name or 'unknown'} (OpenBLAS 아님)"
     return True, ""
 
 
+def baseline_artifact(ctx: RunContext, tctx: TaskContext, bdir: Path) -> Path:
+    """과제 명세의 기준선 파일. python 은 그대로, c 는 run 당 한 번 ``bdir`` 에 빌드한다(샘플과 같은 플래그)."""
+    b = tctx.spec.baseline
+    src = TASKS_DIR / tctx.task / str(b["file"])
+    if not src.exists():
+        raise FileNotFoundError(f"기준선이 없다: {src}")
+    if b["backend"] == "python":
+        return src
+    if tctx.baseline_artifact is not None and tctx.baseline_artifact.exists():
+        return tctx.baseline_artifact
+    cfg = ctx.cfg
+    br = build_c(src.read_text(encoding="utf-8"), ensure_dir(bdir / "build"), cfg.build, openmp=bool(b.get("openmp")),
+                 launch_prefix=protocol.launch_prefix(cfg, cfg.measurement.threads), symbol=tctx.spec.function)
+    if not br.ok or br.artifact is None:
+        raise BaselineError(f"C 기준선 빌드 실패({src}): {br.error_kind} {br.error_detail}")
+    tctx.baseline_artifact = br.artifact
+    return br.artifact
+
+
 def run_baseline_bench(ctx: RunContext, tctx: TaskContext, *, threads: int, out_name: str) -> tuple[dict[str, Any] | None, WorkerOutcome]:
-    """baseline.py 를 python 백엔드로 bench 한다. (결과 문서, 실행 결과). harness_error 는 예외."""
+    """과제의 기준선(python 또는 빌드한 C)을 bench 한다. (결과 문서, 실행 결과). harness_error 는 예외."""
     cfg = ctx.cfg
     bdir = ensure_dir(baseline_dir(cfg.paths.built_dir, ctx.run_id, tctx.task))
-    artifact = TASKS_DIR / tctx.task / "baseline" / BASELINE_FILE
-    if not artifact.exists():
-        raise FileNotFoundError(f"기준선이 없다: {artifact}")
+    b = tctx.spec.baseline
+    artifact = baseline_artifact(ctx, tctx, bdir)
     stage = Path(out_name).stem
     oc = run_worker(
-        cfg, stage=stage, threads=threads, openmp=False, backend="python", artifact=artifact, mode="bench",
-        tests=[tctx.test_path(cfg.measurement.performance_test)], tolerance=tctx.tolerance_path,
+        cfg, stage=stage, threads=threads, openmp=b["backend"] == "c" and bool(b.get("openmp")), backend=str(b["backend"]),
+        artifact=artifact, mode="bench",
+        tests=[tctx.test_path(cfg.measurement.performance_test)], tolerance=tctx.tolerance_path, signatures=tctx.spec.path,
         out_path=bdir / out_name, cwd=bdir, timeout_s=cfg.measurement.bench_timeout_s, extra=bench_args(cfg),
     )
     verdict = oc.verdict()
     if verdict is not None:
         warn(f"기준선 {out_name}: {verdict[0]} — {verdict[1]}")
     return oc.doc, oc
+
+
+def _gate_opts(tctx: TaskContext) -> bool:
+    b = tctx.spec.baseline
+    return b["backend"] == "python" and bool(b.get("gate_blas", True))
+
+
+def _rate(doc: dict[str, Any]) -> str:
+    return f", {doc['gflops']:.1f} GFLOPS" if doc.get("gflops") else ""
 
 
 def prepare_baselines(ctx: RunContext, tctx: TaskContext, *, reuse: bool) -> None:
@@ -353,22 +386,23 @@ def prepare_baselines(ctx: RunContext, tctx: TaskContext, *, reuse: bool) -> Non
             raise BaselineError(f"--no-baseline: 기존 기준선이 없다 ({run_path}, {one_path})")
         info(f"기준선 재사용: {run_path}, {one_path}")
     else:
-        info(f"run 시작 기준선 측정 (threads={m.threads}, cores={m.cores}) …")
+        info(f"{tctx.task}: run 시작 기준선 측정 (threads={m.threads}, cores={m.cores}) …")
         run_doc, _ = run_baseline_bench(ctx, tctx, threads=m.threads, out_name="bench_run.json")
-        ok, why = baseline_gate(run_doc, m.baseline_min_gflops)
+        min_gflops = m.baseline_min_gflops if tctx.spec.baseline.get("gate_min_gflops") else None
+        ok, why = baseline_gate(run_doc, min_gflops, require_openblas=_gate_opts(tctx))
         if not ok:
             raise BaselineError(
                 f"run 시작 기준선 게이트 실패: {why}. 원인 후보: NumPy 가 참조 BLAS(netlib)에 링크됨(시스템 python3-numpy), "
                 f"격리 venv 가 아님, 다른 부하. 확인: `{PYTHON_EXE} -m harness.protocol --probe` 의 numpy_blas, "
                 f"`{PYTHON_EXE} -m harness.protocol --check`."
             )
-        info(f"run 시작 기준선: median {run_doc['median_ms']:.2f} ms, {run_doc['gflops']:.1f} GFLOPS")
-        info(f"1스레드 기준선 측정 (threads=1, core={m.single_core}) …")
+        info(f"{tctx.task}: run 시작 기준선 median {run_doc['median_ms']:.2f} ms{_rate(run_doc)}")
+        info(f"{tctx.task}: 1스레드 기준선 측정 (threads=1, core={m.single_core}) …")
         one_doc, _ = run_baseline_bench(ctx, tctx, threads=1, out_name="bench_1t.json")
-        ok1, why1 = baseline_gate(one_doc, None)
+        ok1, why1 = baseline_gate(one_doc, None, require_openblas=_gate_opts(tctx))
         if not ok1:
             raise BaselineError(f"1스레드 기준선 실패: {why1}")
-        info(f"1스레드 기준선: median {one_doc['median_ms']:.2f} ms, {one_doc['gflops']:.1f} GFLOPS")
+        info(f"{tctx.task}: 1스레드 기준선 median {one_doc['median_ms']:.2f} ms{_rate(one_doc)}")
     tctx.baseline_run = run_doc
     tctx.baseline_1t = one_doc
 
@@ -435,7 +469,7 @@ def finalize_row(ctx: RunContext, row: RunRow, sample_dir: Path, raw_sha256: str
     atomic_write_json(result_path, {"row": row.to_dict(), "raw_sha256": raw_sha256, "stages": stages, "written_at": now_iso()})
     csv_path = ctx.csv_for(row.provider)
     replaced = upsert_row(csv_path, row)
-    info(f"{row.language}/sample_{row.sample_idx}: pass={int(bool(row.passed))} error={row.error_stage}/{row.error_type}"
+    info(f"{row.task}/{row.language}/sample_{row.sample_idx}: pass={int(bool(row.passed))} error={row.error_stage}/{row.error_type}"
          f"{(' ' + row.error_detail) if row.error_detail else ''} → {rel_to_root(csv_path)} ({'교체' if replaced else '추가'})")
     return result_path
 
@@ -584,7 +618,8 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
 
     # 6-b. build
     if lang.backend == "c":
-        br = build_c(ext.code, sample_dir, cfg.build, openmp=openmp, launch_prefix=protocol.launch_prefix(cfg, lang.threads))
+        br = build_c(ext.code, sample_dir, cfg.build, openmp=openmp, launch_prefix=protocol.launch_prefix(cfg, lang.threads),
+                     symbol=tctx.spec.function)
         flags = [*cfg.build.base_flags, *cfg.build.cflags, *([cfg.build.openmp_flag] if openmp else []), *cfg.build.ldflags]
         row.cflags = " ".join(flags)
         row.march_resolved = br.march_resolved or None
@@ -611,7 +646,8 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
 
     def worker(stage: str, mode: str, tests: list[Path], timeout_s: float, extra: list[str] | None = None) -> WorkerOutcome:
         oc = run_worker(cfg, stage=stage, threads=lang.threads, openmp=openmp, backend=lang.backend, artifact=br.artifact,
-                        mode=mode, tests=tests, tolerance=tctx.tolerance_path, out_path=sample_dir / f"{stage}.json",
+                        mode=mode, tests=tests, tolerance=tctx.tolerance_path, signatures=tctx.spec.path,
+                        out_path=sample_dir / f"{stage}.json",
                         cwd=sample_dir, timeout_s=timeout_s, args_mode=row.args or "positional", extra=extra)
         stages[stage] = oc.summary()
         if oc.stdout_bytes > 0:
@@ -679,17 +715,12 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
     row.baseline_time_1t_ms = (tctx.baseline_1t or {}).get("median_ms")
     paired_doc, poc = run_baseline_bench(ctx, tctx, threads=m.threads, out_name=f"paired_sample_{language}_{sample_idx}.json")
     stages["paired_baseline"] = poc.summary()
-    ok, why = baseline_gate(paired_doc, None)
+    ok, why = baseline_gate(paired_doc, None, require_openblas=_gate_opts(tctx))
     if ok and paired_doc is not None:
         row.baseline_time_ms = paired_doc.get("median_ms")
         row.baseline_time_cv = paired_doc.get("cv")
         row.baseline_samples_ms = {"warmup": list(paired_doc.get("warmup_ms") or []), "timed": list(paired_doc.get("timed_ms") or [])}
-        if row.baseline_run_time_ms and row.baseline_time_ms is not None:
-            drift = (row.baseline_time_ms - row.baseline_run_time_ms) / row.baseline_run_time_ms * 100.0
-            row.baseline_drift_pct = drift
-            if abs(drift) > m.baseline_drift_pct_max:
-                add_flag(row, f"baseline_drift={drift:+.1f}%")
-                warn(f"{language}/sample_{sample_idx}: 대응 기준선 drift {drift:+.1f}% > {m.baseline_drift_pct_max:g}%")
+        # baseline_drift_pct 와 drift 플래그는 run 끝에서 정한다(patch_baseline_drift: 과제별 대응 기준선 중앙값 기준).
     else:
         warn(f"{language}/sample_{sample_idx}: 대응 기준선 실패({why}); speedup_vs_baseline 은 NA")
         add_flag(row, FLAG_PAIRED_FAILED)
@@ -755,7 +786,7 @@ def print_summary(rows: list[RunRow], n_skipped: int) -> None:
     """언어별 pass/오류 유형/생성 실패/플래그 수를 stdout 에 출력한다."""
     by_lang: dict[str, list[RunRow]] = {}
     for r in rows:
-        by_lang.setdefault(str(r.language), []).append(r)
+        by_lang.setdefault(f"{r.task}/{r.language}", []).append(r)
     print(f"run 요약: 행 {len(rows)}개 (건너뜀 {n_skipped}개)")
     for lang in sorted(by_lang):
         rs = by_lang[lang]
@@ -768,7 +799,44 @@ def print_summary(rows: list[RunRow], n_skipped: int) -> None:
         speed = [r.speedup_vs_baseline for r in rs if r.speedup_vs_baseline is not None]
         t_desc = f" median_ms={sorted(times)[len(times) // 2]:.2f}" if times else ""
         s_desc = f" speedup={sorted(speed)[len(speed) // 2]:.2f}" if speed else ""
-        print(f"  {lang:10s} n={len(rs)} pass={n_pass} generate_failed={n_gen} flagged={n_flag} errors=[{err_desc}]{t_desc}{s_desc}")
+        print(f"  {lang:20s} n={len(rs)} pass={n_pass} generate_failed={n_gen} flagged={n_flag} errors=[{err_desc}]{t_desc}{s_desc}")
+
+
+DRIFT_FLAG_PREFIX = "baseline_drift="
+
+
+def patch_baseline_drift(ctx: RunContext, entries: list[tuple[RunRow, Path]]) -> None:
+    """drift 를 **과제별 대응 기준선들의 중앙값** 기준으로 다시 계산한다(2026-11-05 사용자 승인으로 규약 변경).
+
+    예전 기준(run 시작 1회 측정)은 그 한 번이 느린 상태에서 재지면 거의 모든 행에 플래그가 붙었다. 이 run 의 모든 행
+    (이번에 건너뛴 행 포함)을 대상으로 ``baseline_drift_pct`` 와 ``baseline_drift=…%`` 플래그를 갱신하고, 값이 바뀐 행만
+    result.json/CSV 를 다시 쓴다."""
+    limit = ctx.cfg.measurement.baseline_drift_pct_max
+    by_task: dict[str, list[float]] = {}
+    for row, _ in entries:
+        if row.baseline_time_ms is not None:
+            by_task.setdefault(str(row.task), []).append(float(row.baseline_time_ms))
+    for row, result_path in entries:
+        vals = sorted(by_task.get(str(row.task), []))
+        if row.baseline_time_ms is None or not vals:
+            continue
+        mid = len(vals) // 2
+        median = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+        drift = (float(row.baseline_time_ms) - median) / median * 100.0 if median > 0 else 0.0
+        flags = [f for f in (row.protocol_flags or []) if not str(f).startswith(DRIFT_FLAG_PREFIX)]
+        if abs(drift) > limit:
+            flags.append(f"{DRIFT_FLAG_PREFIX}{drift:+.1f}%")
+            warn(f"{row.task}/{row.language}/sample_{row.sample_idx}: 대응 기준선 drift {drift:+.1f}% > {limit:g}% (과제 중앙값 {median:.2f} ms)")
+        old_drift = row.baseline_drift_pct
+        if flags == list(row.protocol_flags or []) and old_drift is not None and abs(old_drift - drift) < 1e-9:
+            continue
+        row.baseline_drift_pct = drift
+        row.protocol_flags = flags
+        row.protocol_ok = protocol.flags_ok(flags)
+        data = read_json(result_path) or {}
+        data["row"] = row.to_dict()
+        atomic_write_json(result_path, data)
+        upsert_row(ctx.csv_for(row.provider), row)
 
 
 def patch_model_served_mixed(ctx: RunContext, processed: list[tuple[RunRow, Path]]) -> None:
@@ -873,8 +941,10 @@ def _main(ns: argparse.Namespace) -> int:
     try:
         for task in tasks_present:
             test_dir, manifest = ensure_tests(cfg, task)
+            sig_path = TASKS_DIR / task / "signatures.yaml"
             tctx = TaskContext(task=task, test_dir=test_dir, manifest=manifest,
-                               tolerance_path=TASKS_DIR / task / "tolerance.yaml", signatures=load_signatures(task))
+                               tolerance_path=TASKS_DIR / task / "tolerance.yaml", signatures=load_signatures(task),
+                               spec=load_taskspec(sig_path))
             if not tctx.tolerance_path.exists():
                 raise FileNotFoundError(f"허용오차 파일이 없다: {tctx.tolerance_path}")
             if not ns.skip_bench:
@@ -917,6 +987,7 @@ def _main(ns: argparse.Namespace) -> int:
         processed.append((row, (built if built.is_absolute() else ROOT / built) / RESULT_JSON))
 
     # 10. 요약
+    patch_baseline_drift(ctx, processed)
     patch_model_served_mixed(ctx, processed)
     print_summary(rows, n_skipped)
     return EXIT_OK

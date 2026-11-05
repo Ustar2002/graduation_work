@@ -470,3 +470,16 @@ make aggregate
 - 진단은 stderr에 `[모듈명] ...`. 예외를 삼키지 않는다. 결과 파일 쓰기는 원자적(tmp → `os.replace`).
 - 테스트: `tests/test_<module>.py`(`unittest`). 최소: classify(더미 기대표의 numpy/2, c_seq/2 패턴, 센티널 규칙, 우선순위), extract(펜스·시그니처 사례), schema(열 일치·upsert 교체), procutil(타임아웃 후, 그리고 부모가 SIGINT/SIGTERM/SIGKILL로 죽은 뒤 프로세스 그룹 비어 있음), protocol(/proc/stat 파서).
 - 주석·docstring 한국어, 식별자 영어. 테스트 입력·raw·built는 git에 올리지 않고 `results/runs.csv`(와 `runs_dummy.csv`)만 올린다.
+
+## 16. M2 일반화 (2026-11-05)
+
+§3·§8·§10의 GEMM 전용 서술은 다음으로 일반화됐다. 세부 근거는 `docs/decisions.md` "M2a".
+
+- **과제 명세**: `tasks/<task>/signatures.yaml`에 `args`(`{name, kind: in|out|dim, dtype: float32|int32, shape: [식…]}`), `work`(연산 수 식), `out_guard_extra`, `baseline {backend: python|c, file, openmp, gate_blas, gate_min_gflops}`, 언어별 `param_docs`(프롬프트에 그대로 삽입). 로더는 `harness/taskspec.py`.
+- **프롬프트 변수 추가**: `${function}`, `${param_docs}`.
+- **테스트 npz**: 인자 이름의 입력 배열, `<out>_ref`(float64), dim 스칼라. 형태 이름은 모든 과제가 `tiny, rect, small, large`. 새 과제는 `harness/testgen.py`를 쓴다.
+- **워커**: `--signatures`로 과제 명세를 받아 인자 순서대로 정렬·가드 버퍼를 만들고 호출한다. 입력 변조·가드 검사는 모든 배열(int32 포함)에 적용. 결과 문서에 `task`, `dims`.
+- **분류**: `classify_task(task, …)` — GEMM은 기존 4개 패턴, 그 밖은 `classify_generic` + 2-D 전치 패턴. 규칙 1–6과 샘플 합산은 그대로.
+- **기준선**: 과제 명세가 정한다. C 기준선은 run마다 샘플과 같은 플래그로 빌드해 워커로 측정한다. BLAS·gflops 게이트는 과제가 켠 경우에만.
+- **drift**: run 끝에서 과제별 대응 기준선 중앙값 기준으로 계산한다.
+- **제약**: 출력은 float32 배열 1개, 스칼라 인자는 `int`. 정수 출력·복수 출력은 Tier 2에서 추가한다.

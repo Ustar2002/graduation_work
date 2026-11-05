@@ -1,0 +1,8 @@
+# dot 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float64 누적).
+task: dot
+dtype: float32
+rtol: 1.0e-3                   # NumPy float32 내적(다중 누산기)은 n=2^25 에서 1.5e-4 로 통과; 단순 float32 순차 누적(7e-2)은 실패
+atol: 1.0e-3
+reference_dtype: float64
+numeric_pattern_tol_ratio: 500 # 출력이 스칼라 하나라 '거의 맞음'의 범위를 넓게 잡는다: 상대오차 50 % 이내는 누적 정밀도 문제로 본다
+sentinel: -2048.0              # 입력이 음이 아니므로 결과도 음이 아님

@@ -1,0 +1,39 @@
+# jacobi2d 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+task: jacobi2d
+function: jacobi2d
+params: [src, dst, H, W, T]
+args:
+  - {name: src, kind: in,  dtype: float32, shape: [H, W]}
+  - {name: dst, kind: out, dtype: float32, shape: [H, W]}
+  - {name: H, kind: dim}
+  - {name: W, kind: dim}
+  - {name: T, kind: dim}
+work: "4*(H-2)*(W-2)*T"
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}
+languages:
+  numpy:
+    positional: "def jacobi2d(src, dst, H, W, T):"
+    keyword:    "def jacobi2d(*, src, dst, H, W, T):"
+    param_docs: |-
+      - `src`: `numpy.ndarray`, dtype float32, shape (H, W), C-contiguous, 64-byte aligned, read-only.
+      - `dst`: `numpy.ndarray`, dtype float32, shape (H, W), C-contiguous, 64-byte aligned; the output buffer that must be filled.
+      - `H`, `W`, `T`: Python `int`; the grid dimensions (always equal to the array shapes above) and the number of steps.
+      - Returns: `None` (results are written into `dst`).
+  c_seq:
+    positional: "void jacobi2d(const float* src, float* dst, int H, int W, int T)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: src[y*W + x], dst[y*W + x] for 0 <= y < H, 0 <= x < W.
+
+      - `src`: H*W float32 values, read-only. `dst`: H*W float32 values, the output buffer that must be filled. Both start at 64-byte-aligned addresses.
+      - `H`, `W`: the grid dimensions, always equal to the actual buffer sizes. `T`: the number of steps.
+      - Return value: none (results are written into `dst`).
+  c_openmp:
+    positional: "void jacobi2d(const float* src, float* dst, int H, int W, int T)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: src[y*W + x], dst[y*W + x] for 0 <= y < H, 0 <= x < W.
+
+      - `src`: H*W float32 values, read-only. `dst`: H*W float32 values, the output buffer that must be filled. Both start at 64-byte-aligned addresses.
+      - `H`, `W`: the grid dimensions, always equal to the actual buffer sizes. `T`: the number of steps.
+      - Return value: none (results are written into `dst`).

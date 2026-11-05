@@ -366,6 +366,20 @@ def summarize_runs(df: pd.DataFrame) -> list[dict[str, Any]]:
         valid = _is_true(r["valid_sample"])
         passed = valid & _is_true(r["pass"])
         paired = r["baseline_time_ms"].dropna()
+        # 기준선은 과제마다 다르다(M2): 과제별로 요약하고, run 수준 값은 과제가 하나일 때만 채운다.
+        by_task: list[dict[str, Any]] = []
+        for task, rt in r.groupby("task", sort=True):
+            tp = rt["baseline_time_ms"].dropna()
+            label = f"{run_id}/{task}"
+            by_task.append({
+                "task": str(task),
+                "baseline_run_time_ms": _single_number(rt["baseline_run_time_ms"], label, "baseline_run_time_ms", warnings),
+                "baseline_time_1t_ms": _single_number(rt["baseline_time_1t_ms"], label, "baseline_time_1t_ms", warnings),
+                "baseline_paired_mean_ms": float(tp.mean()) if len(tp) else math.nan,
+                "baseline_paired_n": int(len(tp)),
+                "baseline_drift_abs_max_pct": float(rt["baseline_drift_pct"].abs().max()),
+            })
+        single = by_task[0] if len(by_task) == 1 else None
         out.append({
             "run_id": run_id,
             "provider": "|".join(_distinct_text(r["provider"])),
@@ -376,8 +390,10 @@ def summarize_runs(df: pd.DataFrame) -> list[dict[str, Any]]:
             "n_rows": int(len(r)),
             "n_valid": int(valid.sum()),
             "n_pass": int(passed.sum()),
-            "baseline_run_time_ms": _single_number(r["baseline_run_time_ms"], run_id, "baseline_run_time_ms", warnings),
-            "baseline_time_1t_ms": _single_number(r["baseline_time_1t_ms"], run_id, "baseline_time_1t_ms", warnings),
+            "tasks": [b["task"] for b in by_task],
+            "baselines_by_task": by_task,
+            "baseline_run_time_ms": single["baseline_run_time_ms"] if single else math.nan,
+            "baseline_time_1t_ms": single["baseline_time_1t_ms"] if single else math.nan,
             "baseline_paired_mean_ms": float(paired.mean()) if len(paired) else math.nan,
             "baseline_paired_n": int(len(paired)),
             "baseline_drift_abs_max_pct": float(r["baseline_drift_pct"].abs().max()),
@@ -435,11 +451,12 @@ def render_text(csv_path: Path, mode: str, runs: list[dict[str, Any]], groups: p
             f"model_served={r['model_served'] or 'NA'} effort={r['effort'] or 'NA'} "
             f"rows={r['n_rows']} valid={r['n_valid']} pass={r['n_pass']}"
         )
-        lines.append(
-            f"   baseline: run_start={ms(r['baseline_run_time_ms'])} ms, 1t={ms(r['baseline_time_1t_ms'])} ms, "
-            f"paired_mean={ms(r['baseline_paired_mean_ms'])} ms (n={r['baseline_paired_n']}, "
-            f"max|drift|={pct(r['baseline_drift_abs_max_pct'])}%)"
-        )
+        for b in r.get("baselines_by_task") or []:
+            lines.append(
+                f"   baseline[{b['task']}]: run_start={ms(b['baseline_run_time_ms'])} ms, 1t={ms(b['baseline_time_1t_ms'])} ms, "
+                f"paired_mean={ms(b['baseline_paired_mean_ms'])} ms (n={b['baseline_paired_n']}, "
+                f"max|drift|={pct(b['baseline_drift_abs_max_pct'])}%)"
+            )
         lines.append(f"   languages: {', '.join(r['languages']) or 'NA'}")
         for w in r["warnings"]:
             lines.append(f"   경고: {w}")

@@ -3,17 +3,47 @@
 task: gemm
 function: gemm
 params: [A, B, C, M, N, K]
+# 기계 판독 부분(harness/taskspec.py): 워커가 이 목록으로 버퍼를 만들고 호출한다.
+args:
+  - {name: A, kind: in,  dtype: float32, shape: [M, K]}
+  - {name: B, kind: in,  dtype: float32, shape: [K, N]}
+  - {name: C, kind: out, dtype: float32, shape: [M, N]}
+  - {name: M, kind: dim}
+  - {name: N, kind: dim}
+  - {name: K, kind: dim}
+work: "2*M*N*K"                        # gflops 계산용 부동소수 연산 수
+out_guard_extra: "max(M,N)**2 - M*N"   # swapped_MN_dims 패턴이 가드 안에서 평가되도록
+baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: true, gate_min_gflops: true}
+# 프롬프트에 그대로 들어가는 매개변수 설명(언어별 param_docs). 바꾸면 prompt_hash 가 바뀐다.
 languages:
   numpy:
     positional: "def gemm(A, B, C, M, N, K):"
     keyword:    "def gemm(*, A, B, C, M, N, K):"
     types: {A: "numpy.ndarray float32 shape (M, K), C-contiguous, 64-byte aligned, read-only", B: "numpy.ndarray float32 shape (K, N)", C: "numpy.ndarray float32 shape (M, N), output", M: int, N: int, K: int}
     returns: "None (results are written into C)"
+    param_docs: |-
+      - `A`: `numpy.ndarray`, dtype float32, shape (M, K), C-contiguous, 64-byte aligned, read-only.
+      - `B`: `numpy.ndarray`, dtype float32, shape (K, N), C-contiguous, 64-byte aligned, read-only.
+      - `C`: `numpy.ndarray`, dtype float32, shape (M, N), C-contiguous, 64-byte aligned; the output buffer that must be filled.
+      - `M`, `N`, `K`: Python `int`; the matrix dimensions, always equal to the array shapes above.
+      - Returns: `None` (results are written into `C`).
   c_seq:
     positional: "void gemm(const float* A, const float* B, float* C, int M, int N, int K)"
     keyword: null        # M4: 매개변수 구조체
     indexing: "A[i*K + k], B[k*N + j], C[i*N + j]"
+    param_docs: |-
+      Element access: A[i*K + k], B[k*N + j], C[i*N + j] for 0 <= i < M, 0 <= j < N, 0 <= k < K.
+
+      - `A`: M*K float32 values, read-only. `B`: K*N float32 values, read-only. `C`: M*N float32 values, the output buffer that must be filled. All three start at 64-byte-aligned addresses.
+      - `M`, `N`, `K`: the matrix dimensions, always equal to the actual buffer sizes.
+      - Return value: none (results are written into `C`).
   c_openmp:              # c_seq와 동일
     positional: "void gemm(const float* A, const float* B, float* C, int M, int N, int K)"
     keyword: null        # M4: 매개변수 구조체
     indexing: "A[i*K + k], B[k*N + j], C[i*N + j]"
+    param_docs: |-
+      Element access: A[i*K + k], B[k*N + j], C[i*N + j] for 0 <= i < M, 0 <= j < N, 0 <= k < K.
+
+      - `A`: M*K float32 values, read-only. `B`: K*N float32 values, read-only. `C`: M*N float32 values, the output buffer that must be filled. All three start at 64-byte-aligned addresses.
+      - `M`, `N`, `K`: the matrix dimensions, always equal to the actual buffer sizes.
+      - Return value: none (results are written into `C`).

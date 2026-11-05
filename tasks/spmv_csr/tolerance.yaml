@@ -1,0 +1,8 @@
+# spmv_csr 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float64 누적).
+task: spmv_csr
+dtype: float32
+rtol: 1.0e-4                   # CLAUDE.md §4: SpMV 1e-4
+atol: 1.0e-4                   # 값·x 가 [-1,1) 이라 행 합이 0 근처인 경우가 흔함
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20
+sentinel: -2048.0              # |y_i| ≤ 행 길이 ≤ 32 이므로 정당한 값이 될 수 없음

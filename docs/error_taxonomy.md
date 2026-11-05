@@ -171,3 +171,10 @@ plugins/lint/run_lint.py --language <lang> --file <path> --task <task> --signatu
 | `performance` | 배열 원소 Python 루프, 불필요한 복사, 비연속 접근(안전성은 아니지만 같은 도구로 뽑는 성능 냄새) | `lint_performance` |
 
 `lint_findings_total`은 findings 수. 쓰임: (1) `lint_*` 열, (2) `feedback=compiler+lint` 조건에서 수정 프롬프트에 `findings[].message`를 넣음(M4). 플러그인이 없으면 빈 결과로 진행하고 경고만 남긴다(실험이 막히면 안 된다). 린트 범주는 **오류 분류표(§1)와 별개**이며 `error_type`에 영향을 주지 않는다.
+
+## 부록: 과제 일반화 뒤의 적용 범위 (2026-11-05, M2)
+
+- 규칙 1–6과 샘플 합산은 모든 과제에 그대로 적용한다(`classify_generic`).
+- arg_order 패턴: `gemm`은 §2의 4개 패턴, 그 밖의 과제는 2-D 출력의 `transposed_output`만 본다. 과제별 패턴을 추가하면 이 문서를 갱신한다.
+- `dot`은 출력이 스칼라 하나라 `numeric_pattern_tol_ratio`가 500이다: 허용오차는 넘지만 상대오차 약 50 % 이내면 `numeric_instability`/`imprecise`(float32 누적 정밀도 부족이 대표 사례), 그 밖은 `wrong_output`.
+- 입력 변조와 범위 밖 쓰기 검사는 정수 입력 배열(`row_ptr`, `col_idx`)에도 적용한다.

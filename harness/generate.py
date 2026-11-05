@@ -239,8 +239,8 @@ class _EnvInfo:
         return self._cc_version
 
 
-def load_signature(task: str, language: str, args_mode: str) -> tuple[str, str]:
-    """``tasks/<task>/signatures.yaml`` 에서 (시그니처, 인덱싱 문구). 없으면 ConfigError."""
+def load_signature(task: str, language: str, args_mode: str) -> tuple[str, str, str, str]:
+    """``tasks/<task>/signatures.yaml`` 에서 (시그니처, 인덱싱 문구, 매개변수 설명, 함수 이름). 없으면 ConfigError."""
     path = TASKS_DIR / task / "signatures.yaml"
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -253,7 +253,7 @@ def load_signature(task: str, language: str, args_mode: str) -> tuple[str, str]:
     signature = entry.get(args_mode)
     if not isinstance(signature, str) or not signature:
         raise ConfigError(f"{path}: languages.{language}.{args_mode} 시그니처가 없다 (M4 전까지 positional 만 지원)")
-    return signature, str(entry.get("indexing") or "")
+    return signature, str(entry.get("indexing") or ""), str(entry.get("param_docs") or "").rstrip("\n"), str(spec.get("function") or task)
 
 
 def render_prompt(cfg: Config, machine: dict[str, Any], task: str, lang: LanguageCfg, *, args_mode: str, env: _EnvInfo | None = None) -> RenderedPrompt:
@@ -267,10 +267,12 @@ def render_prompt(cfg: Config, machine: dict[str, Any], task: str, lang: Languag
     system = system_path.read_text(encoding="utf-8").rstrip("\n") + "\n"
     template = lang.prompt.read_text(encoding="utf-8")
     task_spec = spec_path.read_text(encoding="utf-8").rstrip("\n")
-    signature, indexing = load_signature(task, lang.name, args_mode)
+    signature, indexing, param_docs, function = load_signature(task, lang.name, args_mode)
     variables = {
         "signature": signature,
         "indexing": indexing,
+        "param_docs": param_docs,
+        "function": function,
         "python_version": env.python_version(),
         "numpy_version": env.numpy_version(),
         "cc": cfg.build.cc,

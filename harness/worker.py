@@ -1,7 +1,7 @@
 """워커 (설계 §8): LLM 코드를 실행하는 **유일한** 곳. run.py 가 ``procutil.run_isolated`` 로 띄운다.
 
     PYTHON_EXE -m harness.worker --backend {c,python} --artifact PATH --mode {import,check,bench}
-        --tests tiny.npz,rect.npz,small.npz --tolerance tasks/gemm/tolerance.yaml --out result.json
+        --tests tiny.npz,rect.npz,small.npz --tolerance tasks/<task>/tolerance.yaml --signatures tasks/<task>/signatures.yaml --out result.json
         [--check-repeats 2] [--warmup 3 --repeats 10 --min-repeats 3 --budget-s 300] [--args-mode positional] [--max-mem-gb 8]
 
 - 시작: ``prctl(PR_SET_DUMPABLE=0)`` (코어 덤프/apport 차단), ``RLIMIT_AS`` (max_mem_gb). 적용값은 ``limits``,
@@ -24,16 +24,17 @@ import resource
 import sys
 import time
 import traceback
-from ctypes import POINTER, c_float, c_int
+from ctypes import POINTER, c_float, c_int, c_int32
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
-from harness.classify import Tolerance, aggregate_sample, classify_output, load_tolerance
+from harness.classify import Tolerance, aggregate_sample, classify_task, load_tolerance
 from harness.paths import atomic_write_json
 from harness.protocol import blas_identity
+from harness.taskspec import TaskSpec, load_taskspec
 
 _LOG = "[worker]"
 
@@ -49,6 +50,7 @@ BUDGET_FRACTION = 0.8
 SYS_CPU = Path("/sys/devices/system/cpu")
 THERMAL_DIR = Path("/sys/class/thermal")
 PKG_TEMP_TYPE = "x86_pkg_temp"
+DEFAULT_SIGNATURES = Path(__file__).resolve().parents[1] / "tasks" / "gemm" / "signatures.yaml"
 
 
 # ----------------------------------------------------------------------------- 프로세스 제한
@@ -101,11 +103,11 @@ class KernelHandle:
     def invoke(self, bufs: "Buffers") -> Any:
         """커널을 한 번 호출한다. 반환값은 python 백엔드의 것(그 외 None)."""
         if self.backend == "c":
-            self.fn(bufs.A_ptr, bufs.B_ptr, bufs.C_ptr, bufs.M, bufs.N, bufs.K)
+            self.fn(*bufs.c_args)
             return None
         if self.args_mode == "keyword":
-            return self.fn(A=bufs.A2, B=bufs.B2, C=bufs.C2, M=bufs.M, N=bufs.N, K=bufs.K)
-        return self.fn(bufs.A2, bufs.B2, bufs.C2, bufs.M, bufs.N, bufs.K)
+            return self.fn(**dict(zip(bufs.names, bufs.py_args)))
+        return self.fn(*bufs.py_args)
 
 
 def _safe_str(e: BaseException) -> str:
@@ -131,7 +133,7 @@ def _one_line(e: BaseException) -> str:
     return f"{type(e).__name__}: {msg[0] if msg else ''}".rstrip(": ")[:500]
 
 
-def load_kernel(backend: str, artifact: Path, args_mode: str) -> tuple[KernelHandle | None, str, str]:
+def load_kernel(backend: str, artifact: Path, args_mode: str, spec: TaskSpec) -> tuple[KernelHandle | None, str, str]:
     """커널을 로드한다 → ``(handle, classification, detail)``. 실패하면 handle=None,
     classification ∈ ``compile_error`` | ``signature_mismatch``."""
     if backend == "c":
@@ -140,29 +142,30 @@ def load_kernel(backend: str, artifact: Path, args_mode: str) -> tuple[KernelHan
         except OSError as e:
             return None, "compile_error", _one_line(e)
         try:
-            fn = lib.gemm
+            fn = getattr(lib, spec.function)
         except AttributeError as e:
-            return None, "signature_mismatch", f"symbol gemm not found: {e}"[:500]
-        fn.argtypes = [POINTER(c_float)] * 3 + [c_int] * 3
+            return None, "signature_mismatch", f"symbol {spec.function} not found: {e}"[:500]
+        fn.argtypes = [c_int if a.kind == "dim" else POINTER(C_TYPES[a.dtype]) for a in spec.args]
         fn.restype = None
         return KernelHandle("c", fn, args_mode), "", ""
 
-    spec = importlib.util.spec_from_file_location("kernel", str(artifact))
-    if spec is None or spec.loader is None:
+    mspec = importlib.util.spec_from_file_location("kernel", str(artifact))
+    if mspec is None or mspec.loader is None:
         return None, "compile_error", f"cannot create module spec for {artifact}"
-    module = importlib.util.module_from_spec(spec)
+    module = importlib.util.module_from_spec(mspec)
     sys.modules["kernel"] = module
     try:
-        spec.loader.exec_module(module)
+        mspec.loader.exec_module(module)
     except BaseException as e:  # SystemExit/KeyboardInterrupt 도 임포트 실패로 본다
         return None, "compile_error", _one_line(e)
-    fn = getattr(module, "gemm", None)
+    name = spec.function
+    fn = getattr(module, name, None)
     if fn is None:
-        return None, "signature_mismatch", "module has no attribute gemm"
+        return None, "signature_mismatch", f"module has no attribute {name}"
     if not callable(fn):
-        return None, "signature_mismatch", f"gemm is not callable ({type(fn).__name__})"
+        return None, "signature_mismatch", f"{name} is not callable ({type(fn).__name__})"
     if inspect.iscoroutinefunction(fn):
-        return None, "signature_mismatch", "gemm is a coroutine function (async def)"
+        return None, "signature_mismatch", f"{name} is a coroutine function (async def)"
     return KernelHandle("python", fn, args_mode), "", ""
 
 
@@ -184,68 +187,91 @@ class AlignedArray:
         return self.base[self.offset : self.offset + self.n + self.guard.size]
 
 
-def alloc_aligned(n: int, guard: int, sentinel: float) -> AlignedArray:
-    """``base = np.empty(n + 16 + guard)``, 64바이트 경계로 오프셋을 잡고 가드를 센티널로 채운다."""
-    base = np.empty(n + ALIGN_SLACK_FLOATS + guard, dtype=np.float32)
-    off = (-base.ctypes.data % ALIGNMENT_BYTES) // 4
+C_TYPES = {"float32": c_float, "int32": c_int32}
+NP_TYPES = {"float32": np.float32, "int32": np.int32}
+
+
+def alloc_aligned(n: int, guard: int, sentinel: float, dtype: Any = np.float32) -> AlignedArray:
+    """``base = np.empty(n + slack + guard)``, 64바이트 경계로 오프셋을 잡고 가드를 센티널로 채운다(정수 배열은 정수 센티널)."""
+    dt = np.dtype(dtype)
+    base = np.empty(n + ALIGNMENT_BYTES // dt.itemsize + guard, dtype=dt)
+    off = (-base.ctypes.data % ALIGNMENT_BYTES) // dt.itemsize
     view = base[off : off + n]
     guard_view = base[off + n : off + n + guard]
-    guard_view[...] = np.float32(sentinel)
+    guard_view[...] = dt.type(sentinel)
     if view.ctypes.data % ALIGNMENT_BYTES != 0:
         raise RuntimeError("alloc_aligned: 정렬 실패")
     return AlignedArray(view=view, base=base, guard=guard_view, offset=off, n=n)
 
 
 class Buffers:
-    """테스트 하나의 A/B/C 버퍼(정렬 + 가드)와 참조, 복원·검사 헬퍼."""
+    """테스트 하나의 입력·출력 버퍼(정렬 + 가드)와 참조, 복원·검사 헬퍼. 인자 구성은 ``TaskSpec`` 이 정한다."""
 
-    def __init__(self, A: np.ndarray, B: np.ndarray, C_ref: np.ndarray, M: int, N: int, K: int, sentinel: float) -> None:
-        self.M, self.N, self.K = int(M), int(N), int(K)
+    def __init__(self, spec: TaskSpec, data: dict[str, Any], sentinel: float) -> None:
+        self.spec = spec
         self.sentinel = float(sentinel)
-        self.A = alloc_aligned(self.M * self.K, GUARD_INPUT, sentinel)
-        self.B = alloc_aligned(self.K * self.N, GUARD_INPUT, sentinel)
-        self.C = alloc_aligned(self.M * self.N, max(self.M, self.N) ** 2 - self.M * self.N + GUARD_OUTPUT_EXTRA, sentinel)
-        self.A.view[...] = np.asarray(A, dtype=np.float32).reshape(-1)
-        self.B.view[...] = np.asarray(B, dtype=np.float32).reshape(-1)
-        self.A0 = self.A.view.copy()
-        self.B0 = self.B.view.copy()
-        self.C_ref = np.ascontiguousarray(C_ref, dtype=np.float64).reshape(self.M, self.N)
-        # python 백엔드용 2-D 뷰(복사 없음)와 c 백엔드용 포인터
-        self.A2 = self.A.view.reshape(self.M, self.K)
-        self.B2 = self.B.view.reshape(self.K, self.N)
-        self.C2 = self.C.view.reshape(self.M, self.N)
-        self.A_ptr = self.A.view.ctypes.data_as(POINTER(c_float))
-        self.B_ptr = self.B.view.ctypes.data_as(POINTER(c_float))
-        self.C_ptr = self.C.view.ctypes.data_as(POINTER(c_float))
+        self.dims: dict[str, int] = {n: int(data[n]) for n in spec.dim_names}
+        self.names = spec.params
+        self.arrays: dict[str, AlignedArray] = {}
+        self.inputs0: dict[str, np.ndarray] = {}
+        self.py_args: list[Any] = []
+        self.c_args: list[Any] = []
+        for arg in spec.args:
+            if arg.kind == "dim":
+                self.py_args.append(self.dims[arg.name])
+                self.c_args.append(self.dims[arg.name])
+                continue
+            shape = spec.shape_of(arg, self.dims)
+            n = int(np.prod(shape))
+            dt = NP_TYPES[arg.dtype]
+            if arg.kind == "in":
+                arr = alloc_aligned(n, GUARD_INPUT, sentinel, dt)
+                arr.view[...] = np.asarray(data[arg.name], dtype=dt).reshape(-1)
+                self.inputs0[arg.name] = arr.view.copy()
+            else:
+                arr = alloc_aligned(n, spec.guard_extra_of(self.dims) + GUARD_OUTPUT_EXTRA, sentinel, dt)
+            self.arrays[arg.name] = arr
+            # python 백엔드용 다차원 뷰(복사 없음)와 c 백엔드용 포인터
+            self.py_args.append(arr.view.reshape(shape))
+            self.c_args.append(arr.view.ctypes.data_as(POINTER(C_TYPES[arg.dtype])))
+        out_arg = spec.output
+        self.out = self.arrays[out_arg.name]
+        self.ref = np.ascontiguousarray(data[f"{out_arg.name}_ref"], dtype=np.float64).reshape(spec.shape_of(out_arg, self.dims))
 
     def restore_inputs(self) -> None:
-        self.A.view[...] = self.A0
-        self.B.view[...] = self.B0
+        for name, orig in self.inputs0.items():
+            self.arrays[name].view[...] = orig
 
     def fill_sentinel(self) -> None:
-        self.C.view[...] = np.float32(self.sentinel)
+        self.out.view[...] = self.out.view.dtype.type(self.sentinel)
 
     def inputs_mutated(self) -> bool:
-        return not (np.array_equal(self.A.view, self.A0) and np.array_equal(self.B.view, self.B0))
+        return not all(np.array_equal(self.arrays[name].view, orig) for name, orig in self.inputs0.items())
 
     def oob_write(self) -> bool:
-        s = np.float32(self.sentinel)
-        return bool(np.any(self.A.guard != s) or np.any(self.B.guard != s) or np.any(self.C.guard != s))
+        return any(bool(np.any(arr.guard != arr.guard.dtype.type(self.sentinel))) for arr in self.arrays.values())
 
     def working_set_mb(self) -> float:
-        return (self.M * self.K + self.K * self.N + self.M * self.N) * 4 / (1024**2)
+        return sum(arr.view.nbytes for arr in self.arrays.values()) / (1024**2)
 
 
-def load_test(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int, int]:
-    """npz(A, B, C_ref, M, N, K) 를 읽는다."""
-    with np.load(path) as data:
-        A = np.array(data["A"], dtype=np.float32)
-        B = np.array(data["B"], dtype=np.float32)
-        C_ref = np.array(data["C_ref"], dtype=np.float64)
-        M, N, K = int(data["M"]), int(data["N"]), int(data["K"])
-    if A.shape != (M, K) or B.shape != (K, N) or C_ref.shape != (M, N):
-        raise ValueError(f"{path}: 형태 불일치 A={A.shape} B={B.shape} C_ref={C_ref.shape} M,N,K={M},{N},{K}")
-    return A, B, C_ref, M, N, K
+def load_test(path: Path, spec: TaskSpec) -> dict[str, Any]:
+    """테스트 npz 를 읽는다: 인자 이름의 배열·dim 스칼라와 ``<out>_ref``. 형태를 과제 명세와 대조한다."""
+    out_arg = spec.output
+    data: dict[str, Any] = {}
+    with np.load(path) as npz:
+        for name in spec.dim_names:
+            data[name] = int(npz[name])
+        for arg in spec.inputs:
+            data[arg.name] = np.array(npz[arg.name], dtype=NP_TYPES[arg.dtype])
+        data[f"{out_arg.name}_ref"] = np.array(npz[f"{out_arg.name}_ref"], dtype=np.float64)
+    dims = {n: data[n] for n in spec.dim_names}
+    for arg in [*spec.inputs, out_arg]:
+        key = arg.name if arg.kind == "in" else f"{arg.name}_ref"
+        want = spec.shape_of(arg, dims)
+        if tuple(data[key].shape) != want:
+            raise ValueError(f"{path}: {key} 형태 {tuple(data[key].shape)} != 명세 {want} (dims={dims})")
+    return data
 
 
 # ----------------------------------------------------------------------------- 시스템 샘플링
@@ -373,6 +399,7 @@ def _apply_contract_flags(status: str, pattern: str, *, mutated: bool, oob: bool
 
 def run_check(
     handle: KernelHandle,
+    spec: TaskSpec,
     tests: list[tuple[str, Path]],
     tol: Tolerance,
     check_repeats: int,
@@ -391,9 +418,8 @@ def run_check(
     crashed = False
 
     for name, path in tests:
-        A, B, C_ref, M, N, K = load_test(path)
-        bufs = Buffers(A, B, C_ref, M, N, K, tol.sentinel)
-        test_doc: dict[str, Any] = {"name": name, "M": M, "N": N, "K": K, "runs": [], "classification": None,
+        bufs = Buffers(spec, load_test(path, spec), tol.sentinel)
+        test_doc: dict[str, Any] = {"name": name, **bufs.dims, "dims": dict(bufs.dims), "runs": [], "classification": None,
                                     "pattern": "", "nondeterministic": False}
         doc["tests"].append(test_doc)
         outputs: list[np.ndarray] = []
@@ -420,9 +446,9 @@ def run_check(
 
             mutated = bufs.inputs_mutated()
             oob = bufs.oob_write()
-            status, pattern, metrics = classify_output(
-                bufs.C.view, bufs.C_ref, bufs.A0, bufs.B0, M, N, K, tol,
-                oob_write=oob, return_type=run["return_type"], out_full=bufs.C.full,
+            status, pattern, metrics = classify_task(
+                spec.task, bufs.out.view, bufs.ref, bufs.inputs0, bufs.dims, tol,
+                oob_write=oob, return_type=run["return_type"], out_full=bufs.out.full,
             )
             status, pattern = _apply_contract_flags(status, pattern, mutated=mutated, oob=oob)
             run.update({
@@ -433,7 +459,7 @@ def run_check(
             any_mutated = any_mutated or mutated
             any_oob = any_oob or oob
             test_doc["runs"].append(run)
-            outputs.append(bufs.C.view.copy())
+            outputs.append(bufs.out.view.copy())
             writer.flush()
 
         # 테스트 수준 요약
@@ -483,6 +509,7 @@ def _stats(timed_ms: list[float]) -> dict[str, float | None]:
 
 def run_bench(
     handle: KernelHandle,
+    spec: TaskSpec,
     test: tuple[str, Path],
     tol: Tolerance,
     *,
@@ -501,12 +528,11 @@ def run_bench(
     """
     doc = writer.doc
     name, path = test
-    A, B, C_ref, M, N, K = load_test(path)
-    bufs = Buffers(A, B, C_ref, M, N, K, tol.sentinel)
+    bufs = Buffers(spec, load_test(path, spec), tol.sentinel)
     cpus = pinned_cpus() if cpus is None else list(cpus)
 
     doc.update({
-        "test": name, "M": M, "N": N, "K": K, "alignment": ALIGNMENT_BYTES,
+        "test": name, **bufs.dims, "dims": dict(bufs.dims), "task": spec.task, "alignment": ALIGNMENT_BYTES,
         "warmup": warmup, "repeats": repeats, "repeats_reduced": False,
         "warmup_ms": [], "timed_ms": [],
         "median_ms": None, "mean_ms": None, "min_ms": None, "max_ms": None, "cv": None, "gflops": None,
@@ -551,11 +577,11 @@ def run_bench(
             timed_done += 1
             doc["cpu_mhz_samples"].extend(cpu_mhz_samples(cpus))
             if C_first is None:
-                C_first = bufs.C.view.copy()
+                C_first = bufs.out.view.copy()
             else:
-                if not np.array_equal(bufs.C.view, C_first):
+                if not np.array_equal(bufs.out.view, C_first):
                     doc["nondeterministic_bitwise_runs"] += 1
-                    if not outputs_close(bufs.C.view, C_first, tol):
+                    if not outputs_close(bufs.out.view, C_first, tol):
                         doc["nondeterministic_runs"] += 1
 
         if call_idx == 0:
@@ -590,14 +616,15 @@ def run_bench(
         return
 
     doc.update(_stats(doc["timed_ms"]))
-    if doc["median_ms"]:
-        doc["gflops"] = 2.0 * M * N * K / (doc["median_ms"] / 1000.0) / 1e9
+    work = spec.work_of(bufs.dims)
+    if doc["median_ms"] and work is not None:
+        doc["gflops"] = work / (doc["median_ms"] / 1000.0) / 1e9
 
     mutated = bufs.inputs_mutated()
     oob = bufs.oob_write()
-    status, pattern, metrics = classify_output(
-        bufs.C.view, bufs.C_ref, bufs.A0, bufs.B0, M, N, K, tol,
-        oob_write=oob, return_type=_return_type(handle, last_ret), out_full=bufs.C.full,
+    status, pattern, metrics = classify_task(
+        spec.task, bufs.out.view, bufs.ref, bufs.inputs0, bufs.dims, tol,
+        oob_write=oob, return_type=_return_type(handle, last_ret), out_full=bufs.out.full,
     )
     status, pattern = _apply_contract_flags(status, pattern, mutated=mutated, oob=oob)
     doc["final_check"] = {"classification": status, "pattern": pattern, **metrics, "return_type": _return_type(handle, last_ret)}
@@ -636,6 +663,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("import", "check", "bench"), required=True)
     parser.add_argument("--tests", default=None, help="npz 파일 경로(쉼표 구분); check 는 여러 개, bench 는 1개")
     parser.add_argument("--tolerance", type=Path, default=None, help="tolerance.yaml (check/bench 필수)")
+    parser.add_argument("--signatures", type=Path, default=DEFAULT_SIGNATURES, help="과제 signatures.yaml (기본 gemm)")
     parser.add_argument("--out", type=Path, required=True, help="결과 JSON 경로")
     parser.add_argument("--check-repeats", type=int, default=2)
     parser.add_argument("--warmup", type=int, default=3)
@@ -682,7 +710,9 @@ def main(argv: list[str] | None = None) -> int:
             tests = []
             tol = None
 
-        handle, cls, detail = load_kernel(ns.backend, ns.artifact, ns.args_mode)
+        spec = load_taskspec(ns.signatures)
+        doc["task"] = spec.task
+        handle, cls, detail = load_kernel(ns.backend, ns.artifact, ns.args_mode, spec)
         doc["load_ok"] = handle is not None
         doc["load_error"] = detail or None
         if handle is None:
@@ -692,10 +722,10 @@ def main(argv: list[str] | None = None) -> int:
             doc["classification"] = "pass"
         elif ns.mode == "check":
             assert tol is not None
-            run_check(handle, tests, tol, max(1, ns.check_repeats), writer)
+            run_check(handle, spec, tests, tol, max(1, ns.check_repeats), writer)
         else:
             assert tol is not None
-            run_bench(handle, tests[0], tol, warmup=max(0, ns.warmup), repeats=max(1, ns.repeats),
+            run_bench(handle, spec, tests[0], tol, warmup=max(0, ns.warmup), repeats=max(1, ns.repeats),
                       min_repeats=max(1, min(ns.min_repeats, ns.repeats)), budget_s=ns.budget_s, writer=writer,
                       cpus=affinity)
 

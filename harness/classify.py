@@ -162,34 +162,22 @@ def match_arg_order(
     return ""
 
 
-def classify_output(
+def classify_generic(
     out: Any,
     ref64: Any,
-    A0: Any,
-    B0: Any,
-    M: int,
-    N: int,
-    K: int,
     tol: Tolerance,
     *,
+    pattern_fn: Any | None = None,
     oob_write: bool = False,
     return_type: str | None = None,
-    out_full: Any | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
-    """출력 하나를 판정한다 → ``(status, pattern_or_detail, metrics)``. 규칙 순서는 모듈 docstring(설계 §10 v2.1).
-
-    ``out`` 은 센티널(``tol.sentinel``)로 미리 채운 M·N 출력 버퍼(1-D 또는 2-D), ``ref64`` 는 float64 참조(M, N),
-    ``A0``/``B0`` 는 원래 입력(행우선 M·K, K·N), ``return_type`` 은 python 백엔드의 반환값 타입명,
-    ``out_full`` 은 가드 포함 전체 C 버퍼(``swapped_MN_dims`` 용; 없으면 그 패턴은 생략).
-    ``oob_write`` 는 워커가 가드 영역에서 본 플래그: 출력이 허용오차 내(규칙 2)·arg_order(규칙 3)면 판정을 바꾸지 않고
-    metrics 에만 남는다(샘플 수준에서는 ``aggregate_sample`` 과 run.py 의 pass 정의가 플래그를 본다).
-    metrics: ``max_abs_err, max_tol_ratio, n_fail, nan_inf, n_unwritten, n_total, max_abs_ref, oob_write``.
-    """
+    """과제에 무관한 출력 판정(설계 §10 v2.1 규칙 1–6). ``pattern_fn(out_flat, ref)`` 는 과제별 arg_order 패턴 이름
+    (없으면 ``""``)을 돌려주는 함수로, 규칙 3 에서만 불린다. ``ref64`` 의 형태가 출력의 논리 형태다."""
     o32 = np.asarray(out).reshape(-1)
-    n_total = int(M) * int(N)
+    r = np.asarray(ref64, dtype=np.float64)
+    n_total = int(r.size)
     if o32.size != n_total:
-        raise ValueError(f"classify_output: out 크기 {o32.size} != M·N {n_total}")
-    r = np.asarray(ref64, dtype=np.float64).reshape(M, N)
+        raise ValueError(f"classify: out 크기 {o32.size} != 참조 크기 {n_total}")
 
     sentinel = np.asarray(tol.sentinel, dtype=o32.dtype) if o32.dtype.kind == "f" else tol.sentinel
     n_unwritten = int(np.count_nonzero(o32 == sentinel))
@@ -215,7 +203,7 @@ def classify_output(
         return "pass", "", metrics
 
     # 3. arg_order 패턴 — 센티널·OOB 가 남아 있어도 패턴이 전체 버퍼를 설명하면 구조적 오류가 더 정확한 분류다
-    pattern = match_arg_order(o32, r, A0, B0, M, N, K, tol, out_full)
+    pattern = pattern_fn(o32, r) if pattern_fn is not None else ""
     if pattern:
         return "arg_order", pattern, metrics
 
@@ -240,6 +228,69 @@ def classify_output(
 
     # 6. 그 밖
     return "wrong_output", "mismatch", metrics
+
+
+def classify_output(
+    out: Any,
+    ref64: Any,
+    A0: Any,
+    B0: Any,
+    M: int,
+    N: int,
+    K: int,
+    tol: Tolerance,
+    *,
+    oob_write: bool = False,
+    return_type: str | None = None,
+    out_full: Any | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    """GEMM 출력 하나를 판정한다 → ``(status, pattern_or_detail, metrics)``. 규칙은 ``classify_generic``,
+    arg_order 패턴은 ``match_arg_order``(GEMM 전용).
+
+    ``out`` 은 센티널(``tol.sentinel``)로 미리 채운 M·N 출력 버퍼(1-D 또는 2-D), ``ref64`` 는 float64 참조(M, N),
+    ``A0``/``B0`` 는 원래 입력(행우선 M·K, K·N), ``return_type`` 은 python 백엔드의 반환값 타입명,
+    ``out_full`` 은 가드 포함 전체 C 버퍼(``swapped_MN_dims`` 용; 없으면 그 패턴은 생략).
+    ``oob_write`` 는 워커가 가드 영역에서 본 플래그: 출력이 허용오차 내(규칙 2)·arg_order(규칙 3)면 판정을 바꾸지 않고
+    metrics 에만 남는다(샘플 수준에서는 ``aggregate_sample`` 과 run.py 의 pass 정의가 플래그를 본다).
+    metrics: ``max_abs_err, max_tol_ratio, n_fail, nan_inf, n_unwritten, n_total, max_abs_ref, oob_write``.
+    """
+    n_total = int(M) * int(N)
+    if np.asarray(out).size != n_total:
+        raise ValueError(f"classify_output: out 크기 {np.asarray(out).size} != M·N {n_total}")
+    r = np.asarray(ref64, dtype=np.float64).reshape(M, N)
+    return classify_generic(
+        out, r, tol,
+        pattern_fn=lambda o, rr: match_arg_order(o, rr, A0, B0, M, N, K, tol, out_full),
+        oob_write=oob_write, return_type=return_type,
+    )
+
+
+def _transposed_2d(o: np.ndarray, r: np.ndarray, tol: Tolerance) -> str:
+    """2-D 출력의 전치 저장(행·열 길이를 바꿔 씀) 패턴. 과제 공통."""
+    if r.ndim == 2 and _close(np.asarray(o, dtype=np.float64).reshape(r.shape[::-1]).T, r, tol):
+        return "transposed_output"
+    return ""
+
+
+def classify_task(
+    task: str,
+    out: Any,
+    ref64: Any,
+    inputs: dict[str, Any],
+    dims: dict[str, int],
+    tol: Tolerance,
+    *,
+    oob_write: bool = False,
+    return_type: str | None = None,
+    out_full: Any | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    """과제 이름으로 판정기를 고른다. GEMM 은 전용 arg_order 패턴 4종, 그 밖의 과제는 2-D 출력의 전치 패턴만 본다
+    (과제별 패턴을 늘리면 docs/error_taxonomy.md 를 갱신한다)."""
+    if task == "gemm":
+        return classify_output(out, ref64, inputs["A"], inputs["B"], dims["M"], dims["N"], dims["K"], tol,
+                               oob_write=oob_write, return_type=return_type, out_full=out_full)
+    return classify_generic(out, ref64, tol, pattern_fn=lambda o, r: _transposed_2d(o, r, tol),
+                            oob_write=oob_write, return_type=return_type)
 
 
 # ----------------------------------------------------------------------------- 샘플 수준 합산

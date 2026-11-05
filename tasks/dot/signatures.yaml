@@ -1,0 +1,35 @@
+# dot 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+task: dot
+function: dot
+params: [x, y, out, n]
+args:
+  - {name: x, kind: in,  dtype: float32, shape: [n]}
+  - {name: y, kind: in,  dtype: float32, shape: [n]}
+  - {name: out, kind: out, dtype: float32, shape: [1]}
+  - {name: n, kind: dim}
+work: "2*n"
+baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: true, gate_min_gflops: false}
+languages:
+  numpy:
+    positional: "def dot(x, y, out, n):"
+    keyword:    "def dot(*, x, y, out, n):"
+    param_docs: |-
+      - `x`: `numpy.ndarray`, dtype float32, shape (n,), C-contiguous, 64-byte aligned, read-only.
+      - `y`: `numpy.ndarray`, dtype float32, shape (n,), C-contiguous, 64-byte aligned, read-only.
+      - `out`: `numpy.ndarray`, dtype float32, shape (1,), 64-byte aligned; the output buffer that must be filled (`out[0]`).
+      - `n`: Python `int`; the vector length, always equal to the array shapes above.
+      - Returns: `None` (the result is written into `out[0]`).
+  c_seq:
+    positional: "void dot(const float* x, const float* y, float* out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `x`: n float32 values, read-only. `y`: n float32 values, read-only. `out`: one float32 value, the output buffer that must be filled (`out[0]`). All three start at 64-byte-aligned addresses.
+      - `n`: the vector length, always equal to the actual buffer sizes of `x` and `y`.
+      - Return value: none (the result is written into `out[0]`).
+  c_openmp:
+    positional: "void dot(const float* x, const float* y, float* out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `x`: n float32 values, read-only. `y`: n float32 values, read-only. `out`: one float32 value, the output buffer that must be filled (`out[0]`). All three start at 64-byte-aligned addresses.
+      - `n`: the vector length, always equal to the actual buffer sizes of `x` and `y`.
+      - Return value: none (the result is written into `out[0]`).

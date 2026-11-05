@@ -1,7 +1,7 @@
 # LLM 생성 HPC 코드 평가 하네스 — M1 빌드 글루 (docs/harness_design.md §14)
 #
 #   make venv                      python3 -m venv .venv && pip install -r requirements.txt
-#   make tests                     tasks/gemm/gen_tests.py (시드 고정 테스트 입력 npz + manifest.json)
+#   make tests                     tasks/*/gen_tests.py (시드 고정 테스트 입력 npz + manifest.json; 전체 약 620 MB)
 #   make probe                     harness.protocol --probe --write  (config/machine.yaml 생성·갱신)
 #   make unittest                  .venv/bin/python -m unittest discover -s tests
 #   make dummy [RUN_ID=…]          generate --provider dummy → run → aggregate --csv results/runs_dummy.csv
@@ -54,7 +54,7 @@ venv:
 	$(SYSPY) -m venv .venv && $(PIP) install -r requirements.txt
 
 tests:
-	$(PYTHON) tasks/gemm/gen_tests.py
+	@for t in tasks/*/gen_tests.py; do echo "$(PYTHON) $$t"; $(PYTHON) $$t || exit 1; done
 
 probe:
 	$(PYTHON) -m harness.protocol --probe --write

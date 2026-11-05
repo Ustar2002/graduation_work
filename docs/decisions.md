@@ -108,3 +108,17 @@
 - **관찰 3 — drift 플래그 9행 중 7행**: run 시작 기준선이 10.21 ms로 느린 상태에서 재졌고 대응 기준선은 대부분 8.5~8.9 ms였다(numpy/0만 10.30 ms). 기준선이 약 8.5 ms와 10.3 ms 두 상태를 오간다. 속도비는 대응 기준선을 쓰므로 영향이 작지만, drift 기준점이 run 시작 1회 측정이라 플래그가 과하게 붙는다. **제안(측정 규약 변경 — 사용자 확인 필요)**: drift 기준을 run 안 대응 기준선들의 중앙값으로 바꾼다.
 - **관찰 4 — 터보 교란**: 1스레드 c_seq는 3.4~4.0 GHz, 4스레드 실행은 2.6~2.7 GHz에서 돌았다. c_seq 실행 중 패키지 온도 81~84 °C. 노트북에서는 스레드 수가 다른 조건 사이의 비교에 주파수 차이가 섞인다 → 실험 서버로 옮길 근거.
 - **관찰 5 — 첫 실제 API 경로 확인**: preflight, 스트리밍, `request_id`, `effort`·`thinking` 수용, `model_served` 단일값 모두 정상.
+
+## 2026-11-05 (M2a — Tier 1 커널과 하네스 일반화; 사용자 승인 반영)
+
+- **drift 기준 변경(사용자 승인)**: `baseline_drift_pct`와 `baseline_drift=…%` 플래그의 기준을 run 시작 1회 측정에서 **그 run의 과제별 대응 기준선 중앙값**으로 바꿨다(`run.py` `patch_baseline_drift`, run 끝에서 일괄 계산). `baseline_run_time_ms` 열은 그대로 기록한다.
+- **모델은 `claude-sonnet-5-5` 유지(사용자 확인).** 실험은 노트북에서 계속한다. 측정 시간이 문제가 되면 데스크탑으로 옮기되, 옮기면 `make probe`와 `measurement.cores`를 다시 맞추고 기존 행과 섞어 비교하지 않는다.
+- **커널 12개 3단계(사용자 확정)**: M2a = Tier 1 네 개. `CLAUDE.md` §3·§4를 갱신했다. Tier 2·3은 Tier 1 실제 결과를 본 뒤 넣는다.
+- **하네스 일반화**: 과제별 계약을 `tasks/<task>/signatures.yaml`의 `args`(인자 종류·dtype·형태식)·`work`·`baseline`으로 옮기고(`harness/taskspec.py`), 워커·분류기·run·프롬프트가 이를 읽는다. 입력은 float32·int32 배열, 출력은 float32 배열 1개, 스칼라는 `int`만 지원한다(**정수 출력은 Tier 2에서 추가**). GEMM 프롬프트는 M1 실행과 바이트 단위로 같다(`prompt_hash` 동일 확인). GEMM 밖의 과제는 arg_order 패턴으로 2-D 출력의 전치(`transposed_output`)만 본다.
+- **`jacobi2d`** **[CLAUDE.md 이탈: 원문은 1회 반복]**: `jacobi2d(src, dst, H, W, T)`, T 스텝, 경계 고정. 버퍼 교환을 모델의 결정으로 남기려고 작업 버퍼를 주지 않는다. 형태 (5,7,3)·(130,200,4)·(512,512,8) / 성능 (4096,4096,20). rtol 1e-5, atol 1e-6. 기준선은 손으로 쓴 C+OpenMP(`baseline/baseline.c`, 샘플과 같은 플래그로 run마다 빌드).
+- **`spmv_csr`**: `spmv_csr(row_ptr, col_idx, vals, x, y, n_rows, n_cols, nnz)`, int32 인덱스. 행 길이 0~2·avg 균등(빈 행 포함), 열 인덱스는 행 안에서 오름차순·유일. small 10⁴×10⁴ 밀도 1e-3, large 10⁶행·행당 평균 16개(nnz 약 1,600만; 원문 "밀도 1e-3"을 10⁶행에 그대로 쓰면 10⁹개라 불가). rtol 1e-4, atol 1e-4. 기준선 C+OpenMP.
+- **`dot`(STREAM triad 대신)**: reduction 병렬화가 표의 결정 사항이라 dot을 골랐다. `dot(x, y, out, n)`, 결과는 `out[0]`. 입력 uniform[0,1)이라 합이 n/4까지 커진다 — n=2²⁵에서 NumPy float32 내적은 상대오차 1.5e-4로 통과, 단순 float32 순차 누적은 7e-2, 4분할 float32 누적은 6.6e-3으로 실패(실측). **누적 정밀도를 모델의 결정 사항으로 만들기 위한 의도된 설계**다(CLAUDE.md §6의 린트 예시 `numeric/accumulate-in-float32`와 같은 현상). rtol·atol 1e-3. 출력이 스칼라 하나라 `numeric_pattern_tol_ratio`를 500으로 넓혔다(단순 누적 커널이 `numeric_instability`로 분류되는 것 확인). 기준선은 NumPy `np.dot`.
+- **입력 크기 기준(순차 C 0.3~3초)과의 차이**: 이 머신의 기준선 중앙값은 gemm 약 9 ms, jacobi2d 113 ms(1스레드 230 ms), spmv_csr 13 ms(1스레드 43 ms), dot 12 ms다. spmv·dot은 기준보다 짧다. 더 키우면 테스트 파일이 GB 단위가 되고 14 GiB 노트북의 워커 메모리 한도(8 GiB)에 걸린다. ms 단위 측정은 M1에서 변동계수 1~10 %로 가능함을 확인했다. → 데스크탑으로 옮기면 다시 정한다.
+- **Halide로 표현하기 어려운 커널(sort, BFS, prefix scan)** 은 M3에서 Halide를 넣을 때 정한다(해당 조합 제외 또는 Halide 대상 축소).
+- **린트**: 마감과 무관하게 필요해질 때 구현한다(사용자). M1·M2는 빈 결과로 진행.
+- **검증**: 단위 테스트 170개 통과. GEMM 더미 회귀 9행이 M1과 같은 분류. 새 과제 3개 × 언어 3개의 정답 더미 9행 모두 pass(기준선 포함 69초).

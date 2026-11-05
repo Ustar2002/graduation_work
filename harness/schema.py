@@ -518,7 +518,7 @@ def _source_files() -> list[Path]:
     files += sorted(p for p in ROOT.glob("harness/**/*.py") if "__pycache__" not in p.parts)
     files += sorted(ROOT.glob("analysis/*.py"))
     files += sorted(p for p in ROOT.glob("prompts/**/*") if p.is_file())
-    files += [ROOT / "tasks" / "gemm" / name for name in ("spec.md", "signatures.yaml", "tolerance.yaml")]
+    files += [p for name in ("spec.md", "signatures.yaml", "tolerance.yaml") for p in sorted((ROOT / "tasks").glob(f"*/{name}"))]
     files += [ROOT / "config" / "experiment.yaml"]
     return [p for p in files if p.is_file()]
 

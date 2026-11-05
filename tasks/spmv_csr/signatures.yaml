@@ -1,0 +1,41 @@
+# spmv_csr 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+task: spmv_csr
+function: spmv_csr
+params: [row_ptr, col_idx, vals, x, y, n_rows, n_cols, nnz]
+args:
+  - {name: row_ptr, kind: in,  dtype: int32,   shape: ["n_rows + 1"]}
+  - {name: col_idx, kind: in,  dtype: int32,   shape: [nnz]}
+  - {name: vals,    kind: in,  dtype: float32, shape: [nnz]}
+  - {name: x,       kind: in,  dtype: float32, shape: [n_cols]}
+  - {name: y,       kind: out, dtype: float32, shape: [n_rows]}
+  - {name: n_rows, kind: dim}
+  - {name: n_cols, kind: dim}
+  - {name: nnz, kind: dim}
+work: "2*nnz"
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}
+languages:
+  numpy:
+    positional: "def spmv_csr(row_ptr, col_idx, vals, x, y, n_rows, n_cols, nnz):"
+    keyword:    "def spmv_csr(*, row_ptr, col_idx, vals, x, y, n_rows, n_cols, nnz):"
+    param_docs: |-
+      - `row_ptr`: `numpy.ndarray`, dtype int32, shape (n_rows + 1,), C-contiguous, 64-byte aligned, read-only.
+      - `col_idx`: `numpy.ndarray`, dtype int32, shape (nnz,), C-contiguous, 64-byte aligned, read-only.
+      - `vals`: `numpy.ndarray`, dtype float32, shape (nnz,), C-contiguous, 64-byte aligned, read-only.
+      - `x`: `numpy.ndarray`, dtype float32, shape (n_cols,), C-contiguous, 64-byte aligned, read-only.
+      - `y`: `numpy.ndarray`, dtype float32, shape (n_rows,), C-contiguous, 64-byte aligned; the output buffer that must be filled.
+      - `n_rows`, `n_cols`, `nnz`: Python `int`; always equal to the array shapes above.
+      - Returns: `None` (results are written into `y`).
+  c_seq:
+    positional: "void spmv_csr(const int* row_ptr, const int* col_idx, const float* vals, const float* x, float* y, int n_rows, int n_cols, int nnz)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `row_ptr`: n_rows + 1 values of type `int` (32-bit), read-only. `col_idx`: nnz values of type `int`, read-only. `vals`: nnz float32 values, read-only. `x`: n_cols float32 values, read-only. `y`: n_rows float32 values, the output buffer that must be filled. All five start at 64-byte-aligned addresses.
+      - `n_rows`, `n_cols`, `nnz`: the matrix dimensions and the number of stored entries, always equal to the actual buffer sizes.
+      - Return value: none (results are written into `y`).
+  c_openmp:
+    positional: "void spmv_csr(const int* row_ptr, const int* col_idx, const float* vals, const float* x, float* y, int n_rows, int n_cols, int nnz)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `row_ptr`: n_rows + 1 values of type `int` (32-bit), read-only. `col_idx`: nnz values of type `int`, read-only. `vals`: nnz float32 values, read-only. `x`: n_cols float32 values, read-only. `y`: n_rows float32 values, the output buffer that must be filled. All five start at 64-byte-aligned addresses.
+      - `n_rows`, `n_cols`, `nnz`: the matrix dimensions and the number of stored entries, always equal to the actual buffer sizes.
+      - Return value: none (results are written into `y`).
