@@ -866,6 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m harness.run", description="추출·빌드·실행·측정 오케스트레이션 (설계 §8)")
     parser.add_argument("--run-id", default=None, help="results/raw/<run_id> 의 run (--rebuild-csv 외에는 필수)")
     parser.add_argument("--config", type=Path, default=None, help="experiment.yaml 경로")
+    parser.add_argument("--tasks", default=None, help="쉼표 구분 과제 필터 (예: scan,sort)")
     parser.add_argument("--languages", default=None, help="쉼표 구분 언어 필터")
     parser.add_argument("--samples", default=None, help="쉼표 구분 sample_idx 필터 (예: 0,1)")
     parser.add_argument("--skip-bench", action="store_true", help="check 까지만 (bench·대응 기준선 생략)")
@@ -905,6 +906,7 @@ def _main(ns: argparse.Namespace) -> int:
         print(f"{_LOG} --run-id 가 필요하다 (--rebuild-csv 제외)", file=sys.stderr)
         return EXIT_CONFIG
 
+    tasks_filter = {s.strip() for s in ns.tasks.split(",") if s.strip()} if ns.tasks else None
     languages = {s.strip() for s in ns.languages.split(",") if s.strip()} if ns.languages else None
     samples = {int(s) for s in ns.samples.split(",") if s.strip()} if ns.samples else None
     if languages:
@@ -932,6 +934,8 @@ def _main(ns: argparse.Namespace) -> int:
         info(f"harness_version={ctx.version} (git 저장소가 아님)")
 
     raw_files = find_raw_files(cfg, ns.run_id, languages, samples)
+    if tasks_filter is not None:
+        raw_files = [p for p in raw_files if p.parts[-4] in tasks_filter]
     if not raw_files:
         print(f"{_LOG} raw 파일이 없다: {cfg.paths.raw_dir / ns.run_id} — 먼저 `python -m harness.generate --run-id {ns.run_id}` 를 실행하라.",
               file=sys.stderr)

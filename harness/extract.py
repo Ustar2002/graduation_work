@@ -401,6 +401,20 @@ def _check_c(code: str, function: str, params: list[str], expected_prototype: st
 
 # ----------------------------------------------------------------------------- 공개 API
 
+_CODE_START_RE = re.compile(
+    r"^\s*(#\s*(include|define|pragma|if|ifdef|ifndef)\b|import\s|from\s+\w|def\s|class\s|@\w|void\s|static\s|inline\s|int\s|long\s|float\s|double\s|"
+    r"unsigned\s|typedef\s|struct\s|extern\s|const\s|/\*|//|\"\"\"|\'\'\')"
+)
+
+
+def _looks_like_code_start(text: str) -> bool:
+    """첫 비어 있지 않은 줄이 코드처럼 시작하는가(설명문으로 시작하는 응답을 걸러낸다)."""
+    for line in text.splitlines():
+        if line.strip():
+            return bool(_CODE_START_RE.match(line))
+    return False
+
+
 def extract(
     response_text: str,
     *,
@@ -420,7 +434,9 @@ def extract(
     chosen, notes = select_block(blocks, backend, function)
     if chosen is not None:
         code = chosen.code
-    elif not blocks and _has_definition(response_text, backend, function):
+    elif not blocks and _has_definition(response_text, backend, function) and _looks_like_code_start(response_text):
+        # 펜스가 전혀 없지만 응답 전체가 코드인 경우만 코드로 본다(첫 줄이 코드 토큰으로 시작). 설명문 뒤에 코드가 붙은
+        # 응답은 그대로 컴파일하면 설명문 때문에 compile_error 가 되는데, 원인은 출력 형식 위반이므로 no_code_block 으로 둔다(2026-11-08).
         code = response_text
         notes = ["bare_code"]
     else:
