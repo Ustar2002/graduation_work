@@ -161,5 +161,5 @@ pandas로 읽어(`dtype=str, keep_default_na=False` 뒤 수동 변환) 행 키 �
 - **M1 (수직 슬라이스) — 완료(2026-11-05).** 더미 파이프라인 검증(11개 변형 일치, 단위 테스트 164개) 뒤 첫 실제 실행 `20261105-real`: `claude-sonnet-5-5` 9회 호출 모두 pass, 속도비 중앙값 numpy 1.01 / c_openmp 0.97 / c_seq 0.33, 비용 약 0.21달러. 관찰과 후속 제안은 `docs/decisions.md` "M1 완료" 절.
 - **M2a (Tier 1 커널) — 완료(2026-11-08).** 실제 실행 `20261108-tier1`: 60회 호출 중 58 pass(실패 2건은 출력 형식 위반), 비용 약 1.2달러. 결과 해석은 `docs/decisions.md` "M2a 첫 실제 실행" 절.
 - **M2b (Tier 2 커널) — 완료(2026-11-08).** 실제 실행 `20261108-tier2`: 60회 중 52 pass. nbody/numpy 는 5/5 가 행렬곱 재배열의 float32 상쇄로 실패, 형식 위반 2건, 병렬 스캔 버그 1건. 비용 약 1.2달러. 해석은 `docs/decisions.md` "M2b 첫 실제 실행" 절. 다음은 Tier 3(LU/Cholesky, Floyd–Warshall, BFS, FFT).
-- **M2c (Tier 3 커널) — 구현·더미 검증(2026-11-09), 실제 실행 진행.** 과제 `cholesky`, `floyd_warshall`, `bfs`, `fft`; 단위 테스트 262개.
+- **M2c (Tier 3 커널) — 완료(2026-11-09).** 실제 실행 `20261109-tier3`: 60회 중 53 pass(실패 7건 전부 C 의 알고리즘·메모리 버그: bottom-up BFS 방향, 블록 FW 3건, 블록 Cholesky 꼬리, FFT double free). 노트북 클럭이 2배 쌍봉으로 요동해 cholesky·fft 속도비는 불확실성이 크다(첫 측정 보존: `results/runs_20261109-tier3_measurement1.csv`). 해석은 `docs/decisions.md`. **12개 커널 세트의 실제 실행 완료, 총 189행.**
 - M2c(Tier 3 커널) → M3 언어 확장(numba, halide, rust) → M4 마이크로 조건·수정 루프 → M5 perf_summary·ASan/UBSan·린트 → M6 분석·그래프·대시보드 → M7 확장. 앞 단계 결과를 보고 다음 단계를 넣는다(CLAUDE.md 원칙 1).

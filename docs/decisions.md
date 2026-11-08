@@ -194,3 +194,17 @@
 - **bfs**: tiny 의 행 길이 상한을 2 로 낮췄다(상한 32 를 n=7 로 클립하면 완전 그래프가 되어 다단계·−1 을 검사 못 함; spec 에 명시). 층화 추출 경계를 정수 산술로 바꿔 이웃 층 충돌 가능성을 없앴다 — **같은 잠재 결함이 `tasks/spmv_csr/gen_tests.py` 에도 있다**(현재 시드에서는 발생하지 않음; 데이터를 바꾸지 않기 위해 그대로 둔다). rect·small·large 에 도달 불가 정점 없음(평균 차수 16). 기준선 C+OpenMP large 103~110 ms, c_seq 큐 BFS 358 ms(1스레드 기준선 413 ms 보다 빠름), numpy 레벨 동기 1,250 ms. 원자 연산 없는 변형은 6/6 `race_condition`.
 - **fft**: NumPy 2.3.5 는 complex64 를 승격하지 않아 기준선 complex64 로 통과(ratio ≤ 4.6e-5). 직진 radix-2 float32 + double 트위들 더미 ratio ≤ 5.3e-4. **float32 점화식 트위들 변형은 large(2²²)에서만 실패**(ratio 1.43 → `numeric_instability`) — 트위들 정밀도가 실제 결정 사항. 기준선 pocketfft 단일 스레드 151 ms, c_openmp 더미 98~100 ms, c_seq 198 ms. 센티널 -1e9.
 - **`work` 식에 `log2` 허용**(`harness/taskspec.py`).
+
+## 2026-11-09 (M2c 첫 실제 실행 `20261109-tier3`)
+
+- **결과(정확성)**: Tier 3 4과제 × 3언어 × 5샘플 = 60회, `claude-sonnet-5-5`. 생성 실패·절단·거절 0. pass 53/60. 비용: 입력 217,045·출력 182,787 토큰(그중 **thinking 63,938** — 처음으로 adaptive thinking 이 작동, 전부 fft C 커널에서) ≈ 2.3달러.
+- **실패 7건의 성격(전부 C, 알고리즘·메모리 버그)**:
+  - bfs/c_seq 2건: 방향 최적화(bottom-up) BFS 를 썼는데 **방향 그래프에서 bottom-up 은 역방향 간선(전치 CSR)이 필요**한데 정방향 out-이웃을 훑어 거리가 틀렸다(rect·small 에서 최대 5~7 차이). 알고리즘 선택이 과제의 그래프 모델과 맞지 않는 전형.
+  - floyd_warshall 3건(c_openmp 2, c_seq 1): 전부 **블록화(B=64) Floyd–Warshall** 의 단계 순서/꼬리 처리 버그 — tiny(n=8 < B)는 INF 가 그대로 남고(1e30 차이), rect·small 도 틀림. 블록화하지 않은 7개는 모두 통과. 복잡 알고리즘 재구성이 정확성을 잃는 Tier 3 의도된 난이도.
+  - cholesky/c_openmp 1건: 블록 right-looking 에서 n 이 블록 크기의 배수가 아닌 rect(131)만 실패(tiny·small 통과) — 꼬리 블록 처리 버그.
+  - fft/c_seq 1건: four-step FFT 가 rect(1024)에서 `double free or corruption` SIGABRT(`runtime_crash`; ASan 은 M5).
+- **코드 특징**: fft C 10개 전부 double 트위들 + 삼각함수 직접 계산(float32 점화식 함정을 피함), 다수가 AVX2·radix-4·Stockham; numpy fft 는 `np.fft` 위임(2건은 complex128 로 승격해 2배 느림). cholesky C 10개 전부 블록화 + AVX2, numpy 4/5 는 `np.linalg.cholesky` 를 블록 단위로 부르며 `@`(BLAS) 로 트레일링 갱신 — 라이브러리 위임이지만 블록 구조는 직접 결정. bfs c_openmp 5/5 원자 연산 + 프론티어, numpy 5/5 `np.repeat` 벡터화 레벨 동기. floyd numpy 5/5 k 루프 + `np.minimum`.
+- **측정 품질 문제(첫 측정)**: bfs 구간(처음 5분)은 대응 기준선 drift ≤ 8 % 로 안정했으나 cholesky·fft·floyd_warshall 구간에서 대응 기준선이 2배까지 요동(cholesky 173~350 ms, fft 152~385 ms, floyd 39~135 ms; `cpu_mhz_median` 1,241~4,189 MHz, 패키지 온도 60~89 °C, 스로틀 이벤트 최대 79). 같은 `np.fft` 코드인 numpy fft s0~s2 가 160 ms, s3~s4 가 360~380 ms 로 2배 차이 — 지속적 4스레드 부하 뒤 노트북의 전력·열 제한으로 보인다(load_1m 2.0~2.6 은 자기 부하). 대응 기준선 덕에 속도비는 부분적으로 보정되지만 같은 순간의 측정이 아니라 cholesky·fft 의 속도비(2~9배)는 신뢰 구간이 넓다. → 첫 측정을 백업하고 기계가 식은 뒤 세 과제의 측정만 `--force` 로 재실행했다(아래).
+- **재측정 결과(기계를 식힌 뒤 cholesky·fft·floyd_warshall 만 `--force`)**: 노이즈는 그대로였다. 대응 기준선이 **거의 정확히 2배 차이 나는 두 상태**를 오간다(cholesky 175 ↔ 350 ms, fft 155 ↔ 350 ms, floyd 47 ↔ 96 ms; 단일 스레드 `np.fft` 도 160 ↔ 380 ms). 느린 상태의 `cpu_mhz_median` 은 1.3~2.4 GHz, 빠른 상태는 3.5~4.1 GHz → 지속 부하 뒤 P-core 클럭이 절반으로 떨어지는 전력·열 제한(노트북). 같은 샘플의 커널과 대응 기준선이 다른 상태에서 재어지면 속도비가 2배 틀어진다(예: fft c_openmp/4 6.9 → 15.4). bfs 구간(짧은 bench)은 양쪽 측정 모두 안정(drift ≤ 8 %).
+- **처리**: 첫 측정의 행 60개를 `results/runs_20261109-tier3_measurement1.csv` 로 보존하고 `results/runs.csv` 에는 재측정을 둔다. 정확성 결과는 두 측정에서 동일. cholesky·fft 의 속도비는 **2배 범위의 불확실성**을 갖는다고 읽어야 한다(둘 다 C 가 기준선보다 분명히 빠르다는 방향은 양쪽 측정에서 일치).
+- **제안(측정 규약 변경 — 사용자 확인 필요)**: (a) 커널과 대응 기준선을 **같은 워커 안에서 번갈아 호출**(ABAB)해 같은 클럭 상태에서 비교하거나, (b) bench 앞에 패키지 온도·클럭이 기준 아래로 내려올 때까지 대기(쿨다운)하거나, (c) 데스크탑으로 옮긴다. Tier 3 처럼 무거운 커널은 노트북에서 (a) 없이는 속도비 신뢰도가 낮다.
