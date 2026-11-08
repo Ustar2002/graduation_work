@@ -60,6 +60,7 @@ make real RUN_ID=20261105-opus55            # generate(확인 프롬프트) → 
 make real RUN_ID=20261105-opus55 STRICT=1   # run --strict-protocol: run 시작의 정적 규약 플래그(거버너·EPP·taskset)가 있으면 중단(exit 4)
 ```
 
+- **키 보관**: 저장소 루트에 `.env` 파일을 만들어 `ANTHROPIC_API_KEY=…` 한 줄을 넣어 두면 하네스가 시작할 때 읽는다(`.gitignore` 에 포함, 값은 기록·출력되지 않음). 재부팅이나 새 터미널에서 `export` 를 되풀이할 필요가 없다. 이미 설정된 환경변수가 있으면 그쪽이 우선한다.
 - **확인 게이트**: `harness.generate`는 `preflight()`(모델 조회, 과금 없음) 뒤 계획(`<n> calls to <model> via <provider>, max_tokens=…, effort=…`)을 보여주고 `Proceed? [y/N]`을 묻는다. M1 기본 설정은 3샘플 × 3언어 = **9회 호출**(`max_tokens=32000`, 스트리밍)이다. 비대화형(stdin이 tty가 아님)에서는 `--yes`가 없으면 exit 2로 끝나므로, 스크립트에서는 `make` 대신 `.venv/bin/python -m harness.generate --run-id ID --yes` 를 직접 쓴다. 치명 API 오류(인증·404·400)는 raw를 저장한 뒤 즉시 중단(exit 3)한다.
 - 재실행: 같은 `RUN_ID`로 다시 돌리면 정상 응답(`error` 없음, `stop_reason ∈ {end_turn, stop_sequence}`)은 건너뛰고 실패·절단 샘플만 재호출한다(`--no-retry-failed`로 끔, `--force`로 전부 재호출; 기존 파일은 `sample_<i>.prev<N>.json`으로 보관). `harness.run`도 raw 해시가 같은 샘플은 건너뛴다(`--force`).
 - 부분 실행: `harness.run --run-id ID [--languages a,b] [--samples 0,1] [--skip-bench] [--no-baseline]`.

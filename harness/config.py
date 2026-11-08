@@ -452,8 +452,44 @@ def _parse_paths(raw: Any) -> PathsCfg:
 # ----------------------------------------------------------------------------- public API
 
 
+DOTENV_PATH = DEFAULT_EXPERIMENT_YAML.parents[1] / ".env"
+_DOTENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def load_dotenv(path: Path | None = None, *, override: bool = False) -> list[str]:
+    """저장소 루트의 ``.env``(``KEY=VALUE`` 줄, ``#`` 주석, 따옴표 허용)를 환경변수로 넣는다. 이미 있는 변수는 덮어쓰지 않는다.
+
+    재부팅·새 터미널마다 ``export ANTHROPIC_API_KEY=…`` 를 되풀이하지 않기 위한 것이다(2026-11-08). 파일은 .gitignore 에
+    있고, 값은 어디에도 기록·출력하지 않는다. 적용한 변수 이름 목록을 돌려준다."""
+    src = Path(path) if path is not None else DOTENV_PATH
+    applied: list[str] = []
+    try:
+        lines = src.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return applied
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not _DOTENV_KEY_RE.match(key):
+            print(f"[config] 경고: .env 의 변수 이름을 무시한다: {key!r}", file=sys.stderr)
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key in os.environ and not override:
+            continue
+        os.environ[key] = value
+        applied.append(key)
+    return applied
+
+
 def load_config(path: Path | None = None) -> Config:
     """``experiment.yaml`` 을 읽어 검증된 ``Config`` 를 돌려준다. 실패하면 ``ConfigError``."""
+    load_dotenv()
     src = Path(path) if path is not None else DEFAULT_EXPERIMENT_YAML
     src = resolve(src)
     try:

@@ -6,6 +6,8 @@ results/built/*
 # 시드 고정 테스트 입력은 gen_tests.py로 재생성한다
 tasks/*/tests/*.npz
 tasks/*/tests/manifest.json
+# API 키 등 비밀값 (harness/config.py 의 load_dotenv 가 읽는다; 절대 커밋하지 않는다)
+.env
 # Python
 .venv/
 __pycache__/
