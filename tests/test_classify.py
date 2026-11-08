@@ -245,7 +245,8 @@ class ClassifyOutputTest(unittest.TestCase):
         _write_swapped_mn(full, case.good, case.M, case.N)
         status, pattern, _ = case.classify(full[: case.M * case.N], oob_write=True)
         self.assertEqual(status, "wrong_output")
-        self.assertTrue(pattern.startswith("partial_write:"), pattern)
+        # 2026-11-08: partial_write 는 '쓴 원소가 전부 맞을 때'만 붙는다. 여기서는 쓴 원소도 틀리므로(M/N 교환) OOB 규칙으로 떨어진다
+        self.assertEqual(pattern, "out_of_bounds_write")
 
     def test_precedence_combinations(self) -> None:
         mn = RECT.M * RECT.N

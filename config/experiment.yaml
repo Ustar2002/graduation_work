@@ -1,5 +1,5 @@
 run:
-  tasks: [gemm, jacobi2d, spmv_csr, dot]
+  tasks: [gemm, jacobi2d, spmv_csr, dot, histogram, scan, nbody, sort]   # Tier 1(M2a) + Tier 2(M2b, 2026-11-08; docs/harness_design.md §17)
   languages: [numpy, c_seq, c_openmp]
   n_samples: 5                 # M1=3, M2부터 5 (CLAUDE.md §1)
   max_repair_turns: 0          # M1=0 (설계 상한 3; M4)

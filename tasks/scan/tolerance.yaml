@@ -1,0 +1,9 @@
+# scan 허용오차: 정수 출력은 정확 일치(설계 §17). 비교식 |out − ref| ≤ atol + rtol·|ref| 에 rtol = atol = 0 을 넣으면
+# 틀린 원소의 배율(max_tol_ratio)이 inf 가 되어 numeric_instability(imprecise)로 빠지지 않고 wrong_output/mismatch 가 된다.
+task: scan
+dtype: int32
+rtol: 0.0
+atol: 0.0
+reference_dtype: float64       # 참조는 int64 cumsum 을 float64 로 저장(최대 31·2^25 < 2^53 이라 정확)
+numeric_pattern_tol_ratio: 0.0
+sentinel: -2048.0              # 입력이 음이 아니므로 모든 접두합 ≥ 0: 음수 센티널은 정당한 출력이 될 수 없음(int32 로는 -2048)

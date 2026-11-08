@@ -1,0 +1,9 @@
+# histogram 허용오차: 정수 출력이라 정확 일치(rtol = atol = 0). 비교식 |out − ref| ≤ 0 은 out == ref 와 같다.
+# compare 는 tol = 0 에서 틀린 원소의 배율을 inf 로 두므로 numeric_instability 는 나올 수 없다(설계 §17).
+task: histogram
+dtype: int32
+rtol: 0.0
+atol: 0.0
+reference_dtype: float64       # 참조는 float64 로 저장하지만 값은 정수(개수)다
+numeric_pattern_tol_ratio: 0.0 # 정수 출력에는 '거의 맞음'이 없다
+sentinel: -2048.0              # 출력 사전 채움값(int32 로 -2048). 개수는 음이 아니므로 정당한 값이 될 수 없음

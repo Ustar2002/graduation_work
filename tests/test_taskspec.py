@@ -8,22 +8,38 @@ from pathlib import Path
 
 import numpy as np
 
-from harness.classify import Tolerance, classify_task
+from harness.classify import Tolerance, classify_task, load_tolerance
+from harness.config import load_config
 from harness.paths import PYTHON_EXE, ROOT
 from harness.procutil import run_isolated
 from harness.taskspec import TaskSpecError, load_taskspec, parse_taskspec
 
 TASKS = ROOT / "tasks"
 TOL = Tolerance(rtol=1e-3, atol=1e-3, numeric_pattern_tol_ratio=20, sentinel=-2048.0)
+# config/experiment.yaml run.tasks 에 들어 있어야 하는 과제(Tier 1 = M2a, Tier 2 = M2b; 설계 §16·§17)
+TIER1 = ("gemm", "jacobi2d", "spmv_csr", "dot")
+TIER2 = ("histogram", "scan", "nbody", "sort")
 
 
 class TaskSpecTest(unittest.TestCase):
     def test_all_configured_tasks_parse(self):
-        for task in ("gemm", "jacobi2d", "spmv_csr", "dot"):
-            spec = load_taskspec(TASKS / task / "signatures.yaml")
-            self.assertEqual(spec.task, task)
-            self.assertEqual(spec.function, task)
-            self.assertEqual(len([a for a in spec.args if a.kind == "out"]), 1)
+        """run.tasks 의 모든 과제가 signatures/tolerance/spec/baseline 파일을 갖고 명세가 파싱된다(설정과 과제 디렉터리의 어긋남 탐지)."""
+        tasks = load_config().run.tasks
+        for expected in (*TIER1, *TIER2):
+            self.assertIn(expected, tasks)
+        for task in tasks:
+            with self.subTest(task=task):
+                spec = load_taskspec(TASKS / task / "signatures.yaml")
+                self.assertEqual(spec.task, task)
+                self.assertEqual(spec.function, task)
+                self.assertEqual(len([a for a in spec.args if a.kind == "out"]), 1)
+                self.assertTrue((TASKS / task / spec.baseline["file"]).is_file(), spec.baseline)
+                self.assertTrue((TASKS / task / "spec.md").is_file())
+                self.assertTrue((TASKS / task / "gen_tests.py").is_file())
+                tol = load_tolerance(TASKS / task / "tolerance.yaml")
+                self.assertEqual(tol.task, task)
+                if spec.output.dtype == "int32":  # 정수 출력은 정확 일치(§17)
+                    self.assertEqual((tol.rtol, tol.atol, tol.numeric_pattern_tol_ratio), (0.0, 0.0, 0.0))
 
     def test_shapes_work_and_guard(self):
         gemm = load_taskspec(TASKS / "gemm" / "signatures.yaml")

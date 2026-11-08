@@ -1,0 +1,10 @@
+# nbody 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float64 로 모든 쌍을 직접 합산한 값).
+task: nbody
+dtype: float32
+rtol: 1.0e-3                   # 직진 float32 커널(1.0f/sqrtf, AoS, 순차 누적)의 max_tol_ratio 실측(2026-11-08): tiny 2.8e-8, rect 4.9e-5, small 4.3e-4, large 4.9e-3 (≤ 0.2).
+                               # 보정 없는 _mm256_rsqrt_ps 커널은 large 0.17 (rect 0.069, small 0.13) 로 통과, 뉴턴 1회 보정은 large 6.4e-4.
+atol: 0.0                      # 사용 안 함: 아래 atol_rms_rel 이 형태마다 atol 을 정한다
+atol_rms_rel: 1.0e-3           # 테스트마다 atol = 1e-3 × 그 형태 참조 acc 성분 RMS (large 18119 → 18.1, tiny 3.19 → 0.0032). 고정 20 은 tiny 검사를 공허하게 만들었다(2026-11-08 리뷰)
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20  # 모든 원소가 허용오차의 20배 이내로 틀리면 numeric_instability(imprecise), 아니면 wrong_output
+sentinel: -1.0e+6              # 출력 사전 채움값. 정당 범위 밖(large 최대 |acc| 45663)이면서 float32 ulp(0.0625)가 atol 보다 훨씬 작아 '누적' 판정(out − sentinel ≈ ref)이 성립한다. -1e30 은 덧셈을 흡수해 누적을 '미기록'으로 보이게 했다

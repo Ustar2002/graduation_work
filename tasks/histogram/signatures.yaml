@@ -1,0 +1,34 @@
+# histogram 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+# 정수 출력 과제(설계 §17): hist 는 int32, 정확 일치로 판정한다. work 는 두지 않는다(정수 카운팅 — gflops NA).
+task: histogram
+function: histogram
+params: [data, hist, n, nbins]
+args:
+  - {name: data, kind: in,  dtype: int32, shape: [n]}
+  - {name: hist, kind: out, dtype: int32, shape: [nbins]}
+  - {name: n, kind: dim}
+  - {name: nbins, kind: dim}
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}
+languages:
+  numpy:
+    positional: "def histogram(data, hist, n, nbins):"
+    keyword:    "def histogram(*, data, hist, n, nbins):"
+    param_docs: |-
+      - `data`: `numpy.ndarray`, dtype int32, shape (n,), C-contiguous, 64-byte aligned, read-only; every value satisfies 0 <= data[i] < nbins.
+      - `hist`: `numpy.ndarray`, dtype int32, shape (nbins,), 64-byte aligned; the output buffer that must be filled (every element, including bins whose count is 0; its initial contents are arbitrary).
+      - `n`, `nbins`: Python `int`; the number of data values and the number of bins, always equal to the array shapes above.
+      - Returns: `None` (the counts are written into `hist`).
+  c_seq:
+    positional: "void histogram(const int* data, int* hist, int n, int nbins)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `data`: n values of type `int` (32-bit), read-only; every value satisfies 0 <= data[i] < nbins. `hist`: nbins values of type `int`, the output buffer that must be filled (every element, including bins whose count is 0; its initial contents are arbitrary). Both start at 64-byte-aligned addresses.
+      - `n`, `nbins`: the number of data values and the number of bins, always equal to the actual buffer sizes.
+      - Return value: none (the counts are written into `hist`).
+  c_openmp:
+    positional: "void histogram(const int* data, int* hist, int n, int nbins)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `data`: n values of type `int` (32-bit), read-only; every value satisfies 0 <= data[i] < nbins. `hist`: nbins values of type `int`, the output buffer that must be filled (every element, including bins whose count is 0; its initial contents are arbitrary). Both start at 64-byte-aligned addresses.
+      - `n`, `nbins`: the number of data values and the number of bins, always equal to the actual buffer sizes.
+      - Return value: none (the counts are written into `hist`).

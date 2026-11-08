@@ -1,0 +1,39 @@
+# nbody 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+task: nbody
+function: nbody
+params: [pos, mass, acc, n]
+args:
+  - {name: pos,  kind: in,  dtype: float32, shape: [n, 3]}
+  - {name: mass, kind: in,  dtype: float32, shape: [n]}
+  - {name: acc,  kind: out, dtype: float32, shape: [n, 3]}
+  - {name: n, kind: dim}
+work: "20*n*n"                 # 쌍마다 약 20 flop (차 3, 제곱합 5, 역제곱근·세제곱 4, 질량 곱 1, 누적 6, +EPS2 1)
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}
+languages:
+  numpy:
+    positional: "def nbody(pos, mass, acc, n):"
+    keyword:    "def nbody(*, pos, mass, acc, n):"
+    param_docs: |-
+      - `pos`: `numpy.ndarray`, dtype float32, shape (n, 3), C-contiguous, 64-byte aligned, read-only; `pos[i, c]` is coordinate c (0 = x, 1 = y, 2 = z) of body i.
+      - `mass`: `numpy.ndarray`, dtype float32, shape (n,), C-contiguous, 64-byte aligned, read-only; `mass[i]` is the mass of body i.
+      - `acc`: `numpy.ndarray`, dtype float32, shape (n, 3), C-contiguous, 64-byte aligned; the output buffer that must be filled (`acc[i, c]` is component c of the acceleration of body i).
+      - `n`: Python `int`; the number of bodies, always equal to the array shapes above.
+      - Returns: `None` (results are written into `acc`).
+  c_seq:
+    positional: "void nbody(const float* pos, const float* mass, float* acc, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: pos[3*i + c] and acc[3*i + c] for 0 <= i < n and c = 0, 1, 2 (x, y, z); mass[i] for 0 <= i < n.
+
+      - `pos`: 3*n float32 values (the three coordinates of body 0, then of body 1, ...), read-only. `mass`: n float32 values, read-only. `acc`: 3*n float32 values in the same layout as `pos`, the output buffer that must be filled. All three start at 64-byte-aligned addresses.
+      - `n`: the number of bodies, always equal to the actual buffer sizes (`pos` and `acc` hold 3*n values, `mass` holds n).
+      - Return value: none (results are written into `acc`).
+  c_openmp:
+    positional: "void nbody(const float* pos, const float* mass, float* acc, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: pos[3*i + c] and acc[3*i + c] for 0 <= i < n and c = 0, 1, 2 (x, y, z); mass[i] for 0 <= i < n.
+
+      - `pos`: 3*n float32 values (the three coordinates of body 0, then of body 1, ...), read-only. `mass`: n float32 values, read-only. `acc`: 3*n float32 values in the same layout as `pos`, the output buffer that must be filled. All three start at 64-byte-aligned addresses.
+      - `n`: the number of bodies, always equal to the actual buffer sizes (`pos` and `acc` hold 3*n values, `mass` holds n).
+      - Return value: none (results are written into `acc`).

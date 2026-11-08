@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import dataclasses
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ class Tolerance:
     task: str = ""
     dtype: str = "float32"
     reference_dtype: str = "float64"
+    atol_rms_rel: float | None = None  # 있으면 테스트마다 atol = atol_rms_rel × RMS(참조) 로 바꾼다(형태마다 값의 크기가 다른 과제용; nbody)
 
 
 def load_tolerance(path: Path) -> Tolerance:
@@ -69,7 +71,18 @@ def load_tolerance(path: Path) -> Tolerance:
         task=str(raw.get("task", "")),
         dtype=str(raw.get("dtype", "float32")),
         reference_dtype=str(raw.get("reference_dtype", "float64")),
+        atol_rms_rel=(float(raw["atol_rms_rel"]) if raw.get("atol_rms_rel") is not None else None),
     )
+
+
+def effective_tolerance(tol: Tolerance, ref64: Any) -> Tolerance:
+    """``atol_rms_rel`` 이 있으면 이 참조의 RMS 로 atol 을 정한 사본을 돌려준다(없으면 그대로).
+    설계 §17(2026-11-08 보강): nbody 는 형태마다 가속도 크기가 100배 넘게 달라 고정 atol 로는 tiny 검사가 공허해진다."""
+    if tol.atol_rms_rel is None:
+        return tol
+    r = np.asarray(ref64, dtype=np.float64)
+    rms = float(np.sqrt(np.mean(r * r))) if r.size else 0.0
+    return dataclasses.replace(tol, atol=tol.atol_rms_rel * rms)
 
 
 # ----------------------------------------------------------------------------- 비교
@@ -219,7 +232,11 @@ def classify_generic(
     if accumulated["ok"]:
         return "wrong_output", "accumulated_into_c", metrics
     if n_unwritten > 0:
-        return "wrong_output", f"partial_write:{n_unwritten}/{n_total}", metrics
+        # 부분 기록은 '쓴 원소는 다 맞고 일부만 센티널로 남은' 경우에만. 틀린 값이 우연히 센티널과 같은 출력(예: 입력 가드가 흘러든
+        # 정렬 결과)은 mismatch 로 둔다(n_unwritten 은 metrics 에 남는다). 2026-11-08.
+        written = o32 != sentinel
+        if compare(np.asarray(o32, dtype=np.float64)[written], r.reshape(-1)[written], tol.rtol, tol.atol)["ok"]:
+            return "wrong_output", f"partial_write:{n_unwritten}/{n_total}", metrics
     if oob_write:
         return "wrong_output", "out_of_bounds_write", metrics
 

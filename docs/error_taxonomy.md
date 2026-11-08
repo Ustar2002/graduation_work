@@ -126,6 +126,8 @@ classify_output(out, ref64, A0, B0, M, N, K, tol, *, oob_write=False, return_typ
 
 ## 8. 더미 응답 기대표 (검증 기준, 설계 §13)
 
+### 8.1 gemm (M1)
+
 | language | k | 내용 | 기대 (stage / error_type / detail) |
 |---|---|---|---|
 | numpy | 0 | `np.matmul(A, B, out=C)` | pass, bench ok |
@@ -139,6 +141,27 @@ classify_output(out, ref64, A0, B0, M, N, K, tol, *, oob_write=False, return_typ
 | c_openmp | 0 | `#pragma omp parallel for` (i 루프) | pass |
 | c_openmp | 1 | NULL 저장 `float *p = NULL; *p = 1.0f;` | check / runtime_crash / signal SIGSEGV |
 | c_openmp | 2 | k 루프 병렬화 + 공유 누산 | check / race_condition |
+
+### 8.2 Tier 1 (M2a) · Tier 2 (M2b)
+
+Tier 1(`jacobi2d`, `spmv_csr`, `dot`)은 세 언어의 정답(k=0)만 있다(`dummy-m2`: 9행 모두 pass). Tier 2(설계 §17; `harness/dummy_responses/README.md` 와 과제별 README 에 실측 포함)는 정답 12개 + 경쟁 조건 변형 2개다. `k = sample_idx mod 파일 수` 이므로 `--n 2` 로 돌리면 sample 1 이 변형을 밟는다.
+
+| task | language | k | 내용 | 기대 (stage / error_type / detail) |
+|---|---|---|---|---|
+| histogram | numpy | 0 | `hist[...] = np.bincount(data, minlength=nbins)` | pass |
+| histogram | c_seq | 0 | `memset` 0 초기화 + `hist[data[i]]++` | pass |
+| histogram | c_openmp | 0 | 스레드별 private 히스토그램(calloc 스크래치) → `omp for` 빈 합산 | pass |
+| histogram | c_openmp | 1 | 0 초기화 뒤 보호 없는 `#pragma omp parallel for` 공유 `hist[data[i]]++` | check / race_condition / `nondeterministic:<rect,small…>` (유실된 갱신이 두 호출에서 우연히 같으면 wrong_output / mismatch; tiny(n=13)는 충돌이 거의 없어 pass 일 수 있다) |
+| scan | numpy | 0 | `np.cumsum(x, dtype=np.int32, out=out)` | pass |
+| scan | c_seq | 0 | 순차 누적 `acc += x[i]; out[i] = acc` | pass |
+| scan | c_openmp | 0 | 2-pass 블록 스캔(블록 합 → exclusive 오프셋 → 블록 내 스캔) | pass |
+| scan | c_openmp | 1 | `out[i] = out[i-1] + x[i]` 를 `parallel for` 로 — 블록 경계에서 미기록 센티널을 읽음 | check / race_condition / `nondeterministic:<목록>` (어느 형태가 불일치인지는 타이밍 의존; 세 형태 모두 같게 틀리면 wrong_output / mismatch) |
+| nbody | numpy | 0 | float64 로 256행씩 브로드캐스트 직접 합산 → `acc[i0:i1] = …` | pass |
+| nbody | c_seq | 0 | i·j 2중 루프, `1.0f/sqrtf`, AoS | pass (max_tol_ratio ≤ 0.2 계약) |
+| nbody | c_openmp | 0 | 위 커널에 `#pragma omp parallel for schedule(static)` (= 기준선과 같은 코드) | pass, speedup ≈ 1 |
+| sort | numpy | 0 | `out[...] = np.sort(x)` (= 기준선) | pass, speedup ≈ 1 |
+| sort | c_seq | 0 | `memcpy` + `qsort` | pass (large 약 1.3 s/호출, 1스레드) |
+| sort | c_openmp | 0 | 8비트 4패스 병렬 LSD 기수 정렬(스레드별 히스토그램 → 안정 분산) | pass, speedup > 1 |
 
 ## 9. 린트 범주 (M5, 안전성 요약 — CLAUDE.md §6)
 
@@ -178,3 +201,30 @@ plugins/lint/run_lint.py --language <lang> --file <path> --task <task> --signatu
 - arg_order 패턴: `gemm`은 §2의 4개 패턴, 그 밖의 과제는 2-D 출력의 `transposed_output`만 본다. 과제별 패턴을 추가하면 이 문서를 갱신한다.
 - `dot`은 출력이 스칼라 하나라 `numeric_pattern_tol_ratio`가 500이다: 허용오차는 넘지만 상대오차 약 50 % 이내면 `numeric_instability`/`imprecise`(float32 누적 정밀도 부족이 대표 사례), 그 밖은 `wrong_output`.
 - 입력 변조와 범위 밖 쓰기 검사는 정수 입력 배열(`row_ptr`, `col_idx`)에도 적용한다.
+
+## 부록 2: Tier 2 — 정수 출력·nbody 센티널·새 패턴 (2026-11-08, M2b; 설계 §17)
+
+**정수 출력(`histogram`, `scan`, `sort`; 출력 dtype int32).**
+
+- `tolerance.yaml` 은 `rtol: 0.0, atol: 0.0, numeric_pattern_tol_ratio: 0.0, sentinel: -2048.0` 이고 spec 은 "exact equality" 를 요구한다. `compare` 는 허용오차 0 에서 틀린 원소의 배율(`max_tol_ratio`)을 **inf** 로 두므로(`err > 0 → err / 0`), 규칙 5(`imprecise`)는 절대 성립하지 않는다 — 정수 출력은 `pass` 아니면 `wrong_output`(또는 아래 `race_condition`)이다. 집계에서 정수 과제의 `numeric_instability` 는 0 이어야 하며, 0 이 아니면 하네스 버그다.
+- 출력 버퍼는 int32 배열이고 센티널은 정수 `-2048`(`alloc_aligned` 가 `dtype.type(sentinel)` 로 채운다). 세 과제의 정당한 출력은 모두 음이 아니므로(개수·음이 아닌 입력의 접두합·[0, 2³¹−1] 의 정렬) 센티널이 정당한 값일 수 없고, 규칙 4a–4c(`output_not_written`·`accumulated_into_c`·`partial_write`)는 float32 와 똑같이 작동한다. 누적 검사는 `out − (−2048) == ref` 의 정확 일치다.
+- **4b 가 4c 보다 먼저인 이유가 정수에서도 생긴다**: `hist += counts` 처럼 센티널 위에 더한 히스토그램에서 개수 0 인 빈은 정확히 `-2048` 로 남아 `n_unwritten` 에 세어진다(histogram tiny 의 빈 1: `n_unwritten=1`). 순서가 반대였다면 이 커널은 `partial_write:1/4` 로 잘못 기록됐을 것이다(`tests/test_tier2_histogram.py`).
+- 1-D 출력에는 arg_order 패턴이 없다(`transposed_output` 은 2-D 출력에만). 따라서 세 과제의 `error_type` 은 `pass`·`wrong_output`·`race_condition`·`runtime_crash`·`timeout`·`compile_error`·`signature_mismatch` 만 가능하다.
+- 호출 간 불일치(§3)도 허용오차 0 으로 비교하므로 두 호출의 출력이 **비트 단위로 같아야** 한다. 보호 없는 병렬 `hist[data[i]]++`(histogram c_openmp/1)나 순차 의존을 무시한 `parallel for` 스캔(scan c_openmp/1)은 유실·미기록 값이 호출마다 달라 `race_condition`/`nondeterministic:<테스트…>` 가 되고, 우연히 같게 틀리면 `wrong_output`/`mismatch` 다 — 두 결과 모두 "틀린 병렬화" 이며 더미 README 가 둘 다 허용한다. `race_condition` 은 샘플 합산 규칙 2 라 `wrong_output` 보다 먼저다.
+- `gflops` 는 세 과제 모두 NA(`work` 없음); `nbody` 만 `work: 20*n*n`.
+
+**`nbody`(float32 (n, 3) 출력).**
+
+- 센티널은 `-1.0e6`(2026-11-08 변경; 처음 `-1.0e30` 은 float32 덧셈을 흡수해 누적 커널이 '미기록'으로 보였다). 성능 형태(n=16384)의 참조 가속도 성분은 최대 |acc| = 45,663 이라 `-2048` 은 정당한 값일 수 있어 쓰지 않는다. atol 은 형태마다 `1e-3 × RMS(참조 성분)`(large 18.1, tiny 0.0032; 부록 3).
+- 2-D 출력이므로 공통 `transposed_output` 패턴이 적용된다: SoA 로 쓴 출력(`acc[c*n + i]`)은 `out.reshape(3, n).T ≈ ref` 라 `arg_order`/`transposed_output` 이다(의도된 분류; `tests/test_tier2_nbody.py` 가 python·C 커널로 단언). `n = 5` 에서는 전치 뷰 (3, 5)ᵀ 와의 일치가 우연히 성립할 가능성이 있어 단위 테스트는 rect(n=301)에서 검사한다.
+- 입력이 `pos`(n×3)·`mass`(n) 두 개라 GEMM 의 `swapped_operands`·`column_major_all`·`swapped_MN_dims` 는 해당 없음.
+
+**`sort`.** 기준선이 python(`np.sort`, 단일 스레드)이고 `gate_blas: false` 라 기준선 게이트는 완료·`final_check` pass 만 본다(BLAS 정체 무관). 병렬 정렬 커널의 `speedup_vs_baseline > 1` 은 정상이다(dot 과 같은 해석, decisions.md 2026-11-08).
+
+## 부록 3: 2026-11-08 보강 (Tier 2 리뷰 반영)
+
+- **규칙 4c `partial_write` 조건**: 센티널로 남은 원소가 있고 **쓴 원소가 전부 참조와 맞을 때만** `partial_write:<k>/<n>`. 쓴 원소도 틀리면 OOB → `out_of_bounds_write`, 아니면 규칙 5·6(`imprecise`/`mismatch`)으로 간다. 틀린 값이 우연히 센티널과 같아도 더 이상 '부분 기록'으로 라벨되지 않는다.
+- **가드**: 모든 배열에 앞쪽 4096원소·뒤쪽 1024원소(출력은 과제별 추가분 포함) 가드가 있다. 입력 가드 값은 출력 센티널과 다르다(정수 -1073741824, 실수 -3e9). 음수·원거리 인덱스 쓰기가 가드를 벗어나 힙을 깨뜨리면 워커가 종료 중 죽으며, run.py 는 `runtime_crash`/`signal … after complete result (heap corruption suspected)` 로 적는다.
+- **형태별 허용오차**: `tolerance.yaml` 에 `atol_rms_rel` 이 있으면 테스트마다 `atol = atol_rms_rel × RMS(참조)` 를 쓴다(nbody). 적용값은 check/bench 문서의 `atol_effective`.
+- **nbody 센티널은 -1e6**(-1e30 은 덧셈을 흡수해 누적 커널이 '미기록'으로 보였다).
+- **JSON**: 비유한 실수(정수 과제의 배율 inf 등)는 결과 JSON 에 null 로 기록한다. CSV 의 `check_max_tol_ratio` 는 `inf` 문자열.

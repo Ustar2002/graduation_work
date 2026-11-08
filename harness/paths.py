@@ -120,9 +120,20 @@ def atomic_write_text(path: str | os.PathLike[str], text: str, encoding: str = "
     atomic_write_bytes(path, text.encode(encoding))
 
 
+def json_safe(obj: Any) -> Any:
+    """NaN/±Inf 를 None 으로 바꾼 사본(표준 JSON 에는 Infinity/NaN 토큰이 없다; 2026-11-08). dict/list/tuple 을 재귀 처리한다."""
+    if isinstance(obj, float):
+        return obj if obj == obj and obj not in (float("inf"), float("-inf")) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
 def atomic_write_json(path: str | os.PathLike[str], obj: Any, *, indent: int | None = 2) -> None:
-    """JSON을 원자적으로 쓴다(UTF-8, 키 순서 유지, 끝에 개행)."""
-    atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=indent) + "\n")
+    """JSON을 원자적으로 쓴다(UTF-8, 키 순서 유지, 끝에 개행). 비유한 실수는 null 로 쓴다(allow_nan=False 로 재발을 막는다)."""
+    atomic_write_text(path, json.dumps(json_safe(obj), ensure_ascii=False, indent=indent, allow_nan=False) + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:

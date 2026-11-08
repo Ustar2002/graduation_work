@@ -1,7 +1,7 @@
 # LLM 생성 HPC 코드 평가 하네스 — M1 빌드 글루 (docs/harness_design.md §14)
 #
 #   make venv                      python3 -m venv .venv && pip install -r requirements.txt
-#   make tests                     tasks/*/gen_tests.py (시드 고정 테스트 입력 npz + manifest.json; 전체 약 620 MB)
+#   make tests                     tasks/*/gen_tests.py (시드 고정 테스트 입력 npz + manifest.json; 8개 과제 전체 약 1.3 GB, 약 15 s)
 #   make probe                     harness.protocol --probe --write  (config/machine.yaml 생성·갱신)
 #   make unittest                  .venv/bin/python -m unittest discover -s tests
 #   make dummy [RUN_ID=…]          generate --provider dummy → run → aggregate --csv results/runs_dummy.csv
@@ -43,7 +43,7 @@ AGG_CSV := $(if $(CSV),--csv $(CSV),)
 
 help:
 	@echo "make venv                       .venv 생성 + requirements.txt 설치 (SYSPY=$(SYSPY))"
-	@echo "make tests                      tasks/gemm/tests/*.npz + manifest.json 생성"
+	@echo "make tests                      tasks/*/tests/*.npz + manifest.json 생성 (8개 과제, 약 1.3 GB)"
 	@echo "make probe                      config/machine.yaml 생성·갱신 (harness.protocol --probe --write)"
 	@echo "make unittest                   tests/ 단위 테스트"
 	@echo "make dummy [RUN_ID=…]           더미 응답으로 전체 파이프라인 → results/runs_dummy.csv"

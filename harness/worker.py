@@ -31,7 +31,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from harness.classify import Tolerance, aggregate_sample, classify_task, load_tolerance
+from harness.classify import Tolerance, aggregate_sample, classify_task, effective_tolerance, load_tolerance
 from harness.paths import atomic_write_json
 from harness.protocol import blas_identity
 from harness.taskspec import TaskSpec, load_taskspec
@@ -44,6 +44,11 @@ ALIGNMENT_BYTES = 64
 ALIGN_SLACK_FLOATS = 16  # 64 바이트 정렬을 위한 여유(float32 16개 = 64 B)
 GUARD_INPUT = 1024
 GUARD_OUTPUT_EXTRA = 1024
+GUARD_FRONT = 4096  # 앞쪽 가드(원소 수): 음수 인덱스 쓰기(예: hist[-2048]) 탐지용 (2026-11-08)
+# 입력 가드 값은 출력 센티널과 다르게 둔다: 흘러든 가드가 센티널로 오인되지 않고, 정수 입력 가드는 인덱스로 쓰이면 반드시 매핑되지 않은
+# 주소를 쳐 결정적으로 크래시하게(off-by-one 읽기 → hist[data[n]]) 큰 음수를 쓴다.
+INPUT_GUARD_FLOAT = -3.0e9
+INPUT_GUARD_INT = -1073741824  # INT32_MIN / 2
 TRACEBACK_TAIL_CHARS = 2000
 BUDGET_FRACTION = 0.8
 
@@ -181,27 +186,42 @@ class AlignedArray:
     guard: np.ndarray
     offset: int
     n: int
+    front: np.ndarray | None = None
+    guard_value: float = 0.0
 
     @property
     def full(self) -> np.ndarray:
+        """뷰 + 뒤쪽 가드(앞쪽 가드는 제외; swapped_MN_dims 패턴은 out[0] 부터 본다)."""
         return self.base[self.offset : self.offset + self.n + self.guard.size]
+
+    def guards_intact(self) -> bool:
+        gv = self.guard.dtype.type(self.guard_value)
+        if np.any(self.guard != gv):
+            return False
+        return self.front is None or not np.any(self.front != gv)
 
 
 C_TYPES = {"float32": c_float, "int32": c_int32}
 NP_TYPES = {"float32": np.float32, "int32": np.int32}
 
 
-def alloc_aligned(n: int, guard: int, sentinel: float, dtype: Any = np.float32) -> AlignedArray:
-    """``base = np.empty(n + slack + guard)``, 64바이트 경계로 오프셋을 잡고 가드를 센티널로 채운다(정수 배열은 정수 센티널)."""
+def alloc_aligned(n: int, guard: int, sentinel: float, dtype: Any = np.float32, *, front: int = GUARD_FRONT,
+                  guard_value: float | None = None) -> AlignedArray:
+    """``base = np.empty(front + n + slack + guard)``, 뷰를 64바이트 경계에 맞추고 앞·뒤 가드를 ``guard_value``(기본 센티널)로 채운다."""
     dt = np.dtype(dtype)
-    base = np.empty(n + ALIGNMENT_BYTES // dt.itemsize + guard, dtype=dt)
-    off = (-base.ctypes.data % ALIGNMENT_BYTES) // dt.itemsize
+    gv = sentinel if guard_value is None else guard_value
+    slack = ALIGNMENT_BYTES // dt.itemsize
+    base = np.empty(front + n + slack + guard, dtype=dt)
+    addr0 = base.ctypes.data + front * dt.itemsize
+    off = front + ((-addr0) % ALIGNMENT_BYTES) // dt.itemsize
     view = base[off : off + n]
+    front_view = base[off - front : off]
     guard_view = base[off + n : off + n + guard]
-    guard_view[...] = dt.type(sentinel)
+    front_view[...] = dt.type(gv)
+    guard_view[...] = dt.type(gv)
     if view.ctypes.data % ALIGNMENT_BYTES != 0:
         raise RuntimeError("alloc_aligned: 정렬 실패")
-    return AlignedArray(view=view, base=base, guard=guard_view, offset=off, n=n)
+    return AlignedArray(view=view, base=base, guard=guard_view, offset=off, n=n, front=front_view, guard_value=gv)
 
 
 class Buffers:
@@ -225,7 +245,8 @@ class Buffers:
             n = int(np.prod(shape))
             dt = NP_TYPES[arg.dtype]
             if arg.kind == "in":
-                arr = alloc_aligned(n, GUARD_INPUT, sentinel, dt)
+                arr = alloc_aligned(n, GUARD_INPUT, sentinel, dt,
+                                    guard_value=INPUT_GUARD_INT if np.dtype(dt).kind in "iu" else INPUT_GUARD_FLOAT)
                 arr.view[...] = np.asarray(data[arg.name], dtype=dt).reshape(-1)
                 self.inputs0[arg.name] = arr.view.copy()
             else:
@@ -249,7 +270,8 @@ class Buffers:
         return not all(np.array_equal(self.arrays[name].view, orig) for name, orig in self.inputs0.items())
 
     def oob_write(self) -> bool:
-        return any(bool(np.any(arr.guard != arr.guard.dtype.type(self.sentinel))) for arr in self.arrays.values())
+        """어느 배열이든 앞·뒤 가드가 바뀌었으면 True."""
+        return any(not arr.guards_intact() for arr in self.arrays.values())
 
     def working_set_mb(self) -> float:
         return sum(arr.view.nbytes for arr in self.arrays.values()) / (1024**2)
@@ -401,7 +423,7 @@ def run_check(
     handle: KernelHandle,
     spec: TaskSpec,
     tests: list[tuple[str, Path]],
-    tol: Tolerance,
+    tol_base: Tolerance,
     check_repeats: int,
     writer: ResultWriter,
 ) -> None:
@@ -418,8 +440,10 @@ def run_check(
     crashed = False
 
     for name, path in tests:
-        bufs = Buffers(spec, load_test(path, spec), tol.sentinel)
+        bufs = Buffers(spec, load_test(path, spec), tol_base.sentinel)
+        tol = effective_tolerance(tol_base, bufs.ref)  # atol_rms_rel 이 있는 과제는 형태마다 atol 이 다르다
         test_doc: dict[str, Any] = {"name": name, **bufs.dims, "dims": dict(bufs.dims), "runs": [], "classification": None,
+                                    "atol_effective": tol.atol,
                                     "pattern": "", "nondeterministic": False}
         doc["tests"].append(test_doc)
         outputs: list[np.ndarray] = []
@@ -529,10 +553,11 @@ def run_bench(
     doc = writer.doc
     name, path = test
     bufs = Buffers(spec, load_test(path, spec), tol.sentinel)
+    tol = effective_tolerance(tol, bufs.ref)
     cpus = pinned_cpus() if cpus is None else list(cpus)
 
     doc.update({
-        "test": name, **bufs.dims, "dims": dict(bufs.dims), "task": spec.task, "alignment": ALIGNMENT_BYTES,
+        "test": name, **bufs.dims, "dims": dict(bufs.dims), "task": spec.task, "alignment": ALIGNMENT_BYTES, "atol_effective": tol.atol,
         "warmup": warmup, "repeats": repeats, "repeats_reduced": False,
         "warmup_ms": [], "timed_ms": [],
         "median_ms": None, "mean_ms": None, "min_ms": None, "max_ms": None, "cv": None, "gflops": None,

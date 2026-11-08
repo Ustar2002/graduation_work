@@ -506,3 +506,11 @@ Python 시그니처는 같은 이름·순서(`def histogram(data, hist, n, nbins
 - 더미 응답: 과제마다 세 언어의 정답(k=0). `histogram/c_openmp/1.md` 는 보호 없는 `hist[data[i]]++` 병렬 루프(기대: `race_condition`; 결정적으로 틀리면 `wrong_output` — README 에 기록). `scan/c_openmp/1.md` 는 순차 의존을 무시한 `#pragma omp parallel for` 누적(기대: `race_condition` 또는 `wrong_output`).
 - 테스트(`tests/test_tier2_<task>.py`): gen_tests 2회 바이트 동일, 참조 손계산 대조(tiny), python 정답 커널의 worker check pass(tiny·rect), 심은 버그(예: histogram 0 초기화 누락 → `accumulated_into_c`; scan exclusive 스캔 → `wrong_output`; sort 내림차순 → `wrong_output`; nbody SoA 출력 → `arg_order/transposed_output`) 분류.
 - `config/experiment.yaml` 의 `run.tasks` 에 네 과제를 추가하고 `docs/error_taxonomy.md`·`README.md`·더미 README 의 표를 갱신한다.
+
+검증(2026-11-08, 통합): `config/experiment.yaml` `run.tasks` 에 네 과제를 추가했고(Tier 1 유지, 8개), 단위 테스트 214개 통과(`tests/test_taskspec.py` 는 run.tasks 전체를 검사하도록 바꿈), 더미 run `dummy-tier2`(4과제 × 3언어 × 2샘플 = 24행, 354 s)가 기대표와 전부 일치했다 — 정답 22행 pass, 경쟁 변형 2행(`histogram`·`scan` c_openmp/1) `race_condition`; 멱등 재실행 0.26 s(재실행 0, 중복 0). 하네스 코드는 바꾸지 않았다. 기대표·실측은 `harness/dummy_responses/README.md`(과제 전체)·과제별 README·`docs/error_taxonomy.md` §8.2·부록 2, 구현자 실측과 이탈 사항은 `docs/decisions.md` "M2b" 절.
+
+### §17 보강 (2026-11-08 리뷰 반영)
+- 워커 버퍼: 앞쪽 가드 4096원소 추가, 입력 가드 값 분리(정수 -1073741824, 실수 -3e9), `AlignedArray.guards_intact()`.
+- `Tolerance.atol_rms_rel`(선택) → `classify.effective_tolerance(tol, ref)`; nbody 는 `atol_rms_rel: 1e-3`, `sentinel: -1e6`, spec 에 8 GiB 주소 공간 한도 명시.
+- 규칙 4c: 쓴 원소가 전부 맞을 때만 `partial_write`.
+- `paths.atomic_write_json` 은 비유한 실수를 null 로 쓴다(`allow_nan=False`).

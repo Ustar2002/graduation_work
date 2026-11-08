@@ -150,6 +150,9 @@ class WorkerOutcome:
         if self.proc.timed_out:
             return "timeout", f"worker timeout after {self.timeout_s:g}s during {self.in_progress_desc()}"
         if self.proc.rc < 0:
+            if doc.get("complete"):
+                # 결과까지 다 쓴 뒤 인터프리터 종료 중 시그널: 가드 밖 힙 손상(음수·원거리 인덱스 쓰기)이 유력
+                return "runtime_crash", f"signal {self.proc.signal_name} after complete result (heap corruption suspected)"
             return "runtime_crash", f"signal {self.proc.signal_name} during {self.in_progress_desc()}"
         if self.proc.rc == 0 and not doc.get("complete"):
             return "runtime_crash", "worker exited without complete result"

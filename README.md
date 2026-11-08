@@ -1,21 +1,38 @@
-# LLM 생성 HPC 코드 평가 하네스 (졸업프로젝트, M1)
+# LLM 생성 HPC 코드 평가 하네스 (졸업프로젝트, M1–M2b)
 
-경희대 컴퓨터공학부 졸업프로젝트 **"프로그래밍 언어 선택과 언어 특성이 LLM 생성 HPC 코드의 정확성·성능·안전성에 미치는 영향 — 실증 분석(예비 연구)"** 의 실험 하네스다. 같은 과제(M1: 단정밀도 GEMM)를 여러 언어(`numpy`, `c_seq`, `c_openmp`)로 LLM에 생성시켜 **추출 → 빌드 → 격리 실행 → 정확성 판정 → 시간 측정 → CSV 행** 까지를 자동으로 돌리고, 결과를 pass@k·속도비·토큰·오류 유형으로 집계한다. 핵심 가설은 "성능 격차는 추상화 수준이 아니라 성능 결정(루프 순서·타일링·벡터화·병렬화)을 LLM이 직접 내려야 하는가로 설명된다"이다(`CLAUDE.md` §1).
+경희대 컴퓨터공학부 졸업프로젝트 **"프로그래밍 언어 선택과 언어 특성이 LLM 생성 HPC 코드의 정확성·성능·안전성에 미치는 영향 — 실증 분석(예비 연구)"** 의 실험 하네스다. 같은 과제(M1: 단정밀도 GEMM → M2: Tier 1·Tier 2 커널 8개, §1-1)를 여러 언어(`numpy`, `c_seq`, `c_openmp`)로 LLM에 생성시켜 **추출 → 빌드 → 격리 실행 → 정확성 판정 → 시간 측정 → CSV 행** 까지를 자동으로 돌리고, 결과를 pass@k·속도비·토큰·오류 유형으로 집계한다. 핵심 가설은 "성능 격차는 추상화 수준이 아니라 성능 결정(루프 순서·타일링·벡터화·병렬화)을 LLM이 직접 내려야 하는가로 설명된다"이다(`CLAUDE.md` §1).
 
 - 프로젝트 지시서: `CLAUDE.md` (수정 금지)
 - 설계 계약(모듈 인터페이스·JSON 키·CSV 열): `docs/harness_design.md`
 - 결정 기록: `docs/decisions.md` · 측정 규약: `docs/protocol.md` · 오류 분류표: `docs/error_taxonomy.md`
 
-## 1. 저장소 구조 (M1)
+## 1. 저장소 구조
 
 ```
-config/experiment.yaml      실험 설정(모델·n·언어·빌드 플래그·측정 규약)   config/machine.yaml  머신 프로브 결과(생성됨)
-tasks/gemm/                 spec.md(프롬프트에 삽입), signatures.yaml, reference.py, gen_tests.py, tolerance.yaml, baseline/baseline.py
+config/experiment.yaml      실험 설정(모델·n·언어·과제·빌드 플래그·측정 규약)   config/machine.yaml  머신 프로브 결과(생성됨)
+tasks/<task>/               spec.md(프롬프트에 그대로 삽입)·spec.ko.md, signatures.yaml(시그니처·args·work·baseline·param_docs; harness/taskspec.py 가 읽음),
+                            gen_tests.py(harness/testgen.py; 시드 고정 npz), tolerance.yaml, baseline/{baseline.py | baseline.c}, tests/(생성됨, git 제외)
+                            Tier 1: gemm, jacobi2d, spmv_csr, dot   Tier 2: histogram, scan, nbody, sort   (§1-1)
 prompts/system.md, prompts/lang/{numpy,c_seq,c_openmp}.md
 harness/                    generate(LLM 호출) → extract → build/{c,python} → run(오케스트레이션) ← worker(LLM 코드 실행 유일 장소)
-                            llm_client, protocol(측정 규약), classify(오류 분류), schema(CSV 스키마), procutil(격리 실행), dummy_responses/
+                            llm_client, protocol(측정 규약), classify(오류 분류), schema(CSV 스키마), procutil(격리 실행), taskspec, testgen, dummy_responses/
 analysis/aggregate.py       집계         tests/test_*.py  단위 테스트         results/  raw/, built/, runs.csv, runs_dummy.csv
 ```
+
+### 1-1. 과제 목록 (계약은 `tasks/<task>/spec.md`·`signatures.yaml`, 근거는 `docs/harness_design.md` §3·§16·§17, `docs/decisions.md`)
+
+모두 호출자가 할당한 출력 버퍼 1개에 결과를 쓰고(반환값 무시), 입력은 읽기 전용, 64바이트 정렬, 형태 이름은 `tiny / rect / small`(정확성) · `large`(성능). 정수 출력은 정확 일치(rtol = atol = 0).
+
+| task | Tier | 시그니처(C; Python 은 같은 이름·순서) | 출력 | 형태 tiny / rect / small / large | 허용오차 | 기준선 |
+|---|---|---|---|---|---|---|
+| `gemm` | 1 | `void gemm(const float* A, const float* B, float* C, int M, int N, int K)` | float32 M×N | (7,5,3) / (200,130,312) / 256³ / 1024³ | rtol·atol 1e-3 | NumPy `np.matmul(out=)`(OpenBLAS) |
+| `jacobi2d` | 1 | `void jacobi2d(const float* src, float* dst, int H, int W, int T)` | float32 H×W (T 스텝) | (5,7,3) / (130,200,4) / (512,512,8) / (4096,4096,20) | rtol 1e-5, atol 1e-6 | C+OpenMP |
+| `spmv_csr` | 1 | `void spmv_csr(const int* row_ptr, const int* col_idx, const float* vals, const float* x, float* y, int n_rows, int n_cols, int nnz)` | float32 n_rows | 5 / 300 / 10⁴ / 10⁶ 행 (large nnz ≈ 1.6×10⁷) | rtol·atol 1e-4 | C+OpenMP |
+| `dot` | 1 | `void dot(const float* x, const float* y, float* out, int n)` | float32 `out[0]` | 7 / 100,003 / 2²⁰ / 2²⁵ | rtol·atol 1e-3 (배율 500) | NumPy `np.dot` |
+| `histogram` | 2 | `void histogram(const int* data, int* hist, int n, int nbins)` | int32 nbins (0 초기화는 커널 책임) | (13,4) / (100,003,37) / (2²⁰,256) / (2²⁵,1024) | 정확 일치 | C+OpenMP(스레드별 private 히스토그램) |
+| `scan` | 2 | `void scan(const int* x, int* out, int n)` | int32 n (inclusive; x ∈ [0,32)) | 7 / 100,003 / 2²⁰ / 2²⁵ | 정확 일치 | C+OpenMP(2-pass 블록 스캔) |
+| `nbody` | 2 | `void nbody(const float* pos, const float* mass, float* acc, int n)` | float32 n×3 AoS (EPS2 = 1e-4, G = 1) | 5 / 301 / 2,048 / 16,384 | rtol 1e-3, atol = 1e-3 × RMS(참조) (형태별), 센티널 −1e6 | C+OpenMP(i 병렬, `1.0f/sqrtf`) |
+| `sort` | 2 | `void sort(const int* x, int* out, int n)` | int32 n 오름차순 (x ∈ [0, 2³¹−1]) | 7 / 100,003 / 2²⁰ / 10⁷ | 정확 일치 | NumPy `np.sort`(단일 스레드) |
 
 ## 2. 설치
 
@@ -24,7 +41,7 @@ analysis/aggregate.py       집계         tests/test_*.py  단위 테스트    
 ```sh
 make venv                 # python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  (다른 인터프리터: make venv SYSPY=python3.14)
 make probe                # config/machine.yaml 생성 (CPU 토폴로지·거버너·BLAS 정체·컴파일러)
-make tests                # tasks/gemm/tests/{tiny,rect,small,large}.npz + manifest.json (시드 고정, 바이트 동일 재생성)
+make tests                # tasks/*/tests/{tiny,rect,small,large}.npz + manifest.json (8개 과제, 시드 고정, 바이트 동일 재생성; 전체 약 1.3 GB, 약 15 s)
 make unittest             # tests/ 단위 테스트
 ```
 
@@ -48,7 +65,7 @@ make dummy                # RUN_ID=dummy-<timestamp> 로
 make dummy RUN_ID=my-dummy
 ```
 
-`harness/dummy_responses/gemm/<language>/<k>.md`의 고정 응답(샘플 i는 `i mod 파일 수`)으로 생성 단계를 대신한다. 기대 결과표(pass/`numeric_instability`/`arg_order`/`compile_error`/`runtime_crash`/`race_condition` 각 1건 이상)는 `harness/dummy_responses/gemm/README.md`와 `docs/error_taxonomy.md` §8에 있다. 더미 행은 `provider=dummy`로 **`results/runs_dummy.csv`에 분리 저장**되며 실제 결과와 섞이지 않는다(키가 없어도 실제 제공자에서 dummy로 자동 폴백하지 않는다).
+`harness/dummy_responses/<task>/<language>/<k>.md`의 고정 응답(샘플 i는 `i mod 파일 수`)으로 생성 단계를 대신한다. 기대 결과표는 `harness/dummy_responses/README.md`(과제 전체)와 과제별 README(`gemm`: 11개 변형으로 pass/`numeric_instability`/`arg_order`/`compile_error`/`runtime_crash`/`race_condition` 각 1건 이상; `histogram`·`scan`: 정답 + 경쟁 조건 변형; `nbody`·`sort`: 정답), 그리고 `docs/error_taxonomy.md` §8에 있다. Tier 2 만 돌리려면 `.venv/bin/python -m harness.generate --provider dummy --run-id dummy-tier2 --tasks histogram,scan,nbody,sort --n 2` 뒤 `harness.run --run-id dummy-tier2`(sample 1 이 k=1 변형을 밟는다). 더미 행은 `provider=dummy`로 **`results/runs_dummy.csv`에 분리 저장**되며 실제 결과와 섞이지 않는다(키가 없어도 실제 제공자에서 dummy로 자동 폴백하지 않는다).
 
 ## 4. 실제 실행
 
@@ -143,4 +160,5 @@ pandas로 읽어(`dtype=str, keep_default_na=False` 뒤 수동 변환) 행 키 �
 
 - **M1 (수직 슬라이스) — 완료(2026-11-05).** 더미 파이프라인 검증(11개 변형 일치, 단위 테스트 164개) 뒤 첫 실제 실행 `20261105-real`: `claude-sonnet-5-5` 9회 호출 모두 pass, 속도비 중앙값 numpy 1.01 / c_openmp 0.97 / c_seq 0.33, 비용 약 0.21달러. 관찰과 후속 제안은 `docs/decisions.md` "M1 완료" 절.
 - **M2a (Tier 1 커널) — 완료(2026-11-08).** 실제 실행 `20261108-tier1`: 60회 호출 중 58 pass(실패 2건은 출력 형식 위반), 비용 약 1.2달러. 결과 해석은 `docs/decisions.md` "M2a 첫 실제 실행" 절.
-- M2b·M2c(Tier 2·3 커널) → M3 언어 확장(numba, halide, rust) → M4 마이크로 조건·수정 루프 → M5 perf_summary·ASan/UBSan·린트 → M6 분석·그래프·대시보드 → M7 확장. 앞 단계 결과를 보고 다음 단계를 넣는다(CLAUDE.md 원칙 1).
+- **M2b (Tier 2 커널: `histogram`, `scan`, `nbody`, `sort`) — 더미 검증 완료(2026-11-08), 실제 실행 대기.** 네 과제를 `run.tasks` 에 추가(정수 출력·정확 일치 지원 포함), 단위 테스트 214개 통과. 더미 run `dummy-tier2`(4과제 × 3언어 × 2샘플 = 24행, 354 s): 정답 22행 pass, 경쟁 조건 변형 2행(`histogram`·`scan` c_openmp/1) `race_condition` 으로 기대표(`harness/dummy_responses/README.md`)와 모두 일치, 멱등 재실행 0.26 s(재실행 0·중복 0). **다음**: 실제 실행 4과제 × 3언어 × 5샘플 = **60회 호출**(Tier 1 의 60회가 약 1.2달러였으므로 비슷한 비용 예상) — 사용자 확인 뒤 `.venv/bin/python -m harness.generate --run-id <ID> --tasks histogram,scan,nbody,sort` → `harness.run --run-id <ID>` → `analysis.aggregate --run-id <ID>`. 실측·이탈 사항은 `docs/decisions.md` "M2b" 절.
+- M2c(Tier 3 커널) → M3 언어 확장(numba, halide, rust) → M4 마이크로 조건·수정 루프 → M5 perf_summary·ASan/UBSan·린트 → M6 분석·그래프·대시보드 → M7 확장. 앞 단계 결과를 보고 다음 단계를 넣는다(CLAUDE.md 원칙 1).

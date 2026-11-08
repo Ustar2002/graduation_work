@@ -1,0 +1,33 @@
+# scan 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+# 정수 출력(int32) 과제: 하네스는 정확 일치로 판정한다(설계 §17). work 는 두지 않는다(정수 연산 — gflops NA).
+task: scan
+function: scan
+params: [x, out, n]
+args:
+  - {name: x,   kind: in,  dtype: int32, shape: [n]}
+  - {name: out, kind: out, dtype: int32, shape: [n]}
+  - {name: n,   kind: dim}
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}
+languages:
+  numpy:
+    positional: "def scan(x, out, n):"
+    keyword:    "def scan(*, x, out, n):"
+    param_docs: |-
+      - `x`: `numpy.ndarray`, dtype int32, shape (n,), C-contiguous, 64-byte aligned, read-only.
+      - `out`: `numpy.ndarray`, dtype int32, shape (n,), C-contiguous, 64-byte aligned; the output buffer that must be filled.
+      - `n`: Python `int`; the array length, always equal to the array shapes above.
+      - Returns: `None` (results are written into `out`).
+  c_seq:
+    positional: "void scan(const int* x, int* out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `x`: n values of type `int` (32-bit), read-only. `out`: n values of type `int` (32-bit), the output buffer that must be filled. Both start at 64-byte-aligned addresses.
+      - `n`: the array length, always equal to the actual buffer sizes of `x` and `out`.
+      - Return value: none (results are written into `out`).
+  c_openmp:
+    positional: "void scan(const int* x, int* out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `x`: n values of type `int` (32-bit), read-only. `out`: n values of type `int` (32-bit), the output buffer that must be filled. Both start at 64-byte-aligned addresses.
+      - `n`: the array length, always equal to the actual buffer sizes of `x` and `out`.
+      - Return value: none (results are written into `out`).

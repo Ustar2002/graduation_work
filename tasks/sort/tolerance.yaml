@@ -1,0 +1,9 @@
+# sort 허용오차: 정수 출력은 정확 일치(docs/harness_design.md §17). 비교식 |out − ref| ≤ atol + rtol·|ref| 에서
+# rtol = atol = 0 이므로 틀린 원소의 배율은 inf 가 되어 numeric_instability 로 분류될 수 없다(wrong_output 만 가능).
+task: sort
+dtype: int32
+rtol: 0.0
+atol: 0.0
+reference_dtype: float64        # 참조는 정렬 복사본을 float64 로 담은 것(2^53 미만의 정수라 정확)
+numeric_pattern_tol_ratio: 0.0
+sentinel: -2048.0               # 입력이 [0, 2^31 − 1] 이라 출력에 음수가 나올 수 없음(정수 배열에는 -2048 로 채워진다)
