@@ -1,0 +1,38 @@
+# fft 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+# 복소수는 교차 저장(interleaved): 원소 j 의 실수부가 [j][0](C: [2*j]), 허수부가 [j][1](C: [2*j+1]).
+task: fft
+function: fft
+params: [x, out, n]
+args:
+  - {name: x,   kind: in,  dtype: float32, shape: [n, 2]}
+  - {name: out, kind: out, dtype: float32, shape: [n, 2]}
+  - {name: n, kind: dim}
+work: "5*n*log2(n)"            # radix-2 복소 FFT 의 관용적 flop 수(버터플라이당 복소 곱 1 + 덧셈 2 = 10 flop × (n/2)·log2 n)
+baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: false, gate_min_gflops: false}
+languages:
+  numpy:
+    positional: "def fft(x, out, n):"
+    keyword:    "def fft(*, x, out, n):"
+    param_docs: |-
+      - `x`: `numpy.ndarray`, dtype float32, shape (n, 2), C-contiguous, 64-byte aligned, read-only; `x[j, 0]` is the real part and `x[j, 1]` the imaginary part of input element j.
+      - `out`: `numpy.ndarray`, dtype float32, shape (n, 2), C-contiguous, 64-byte aligned; the output buffer that must be filled (`out[k, 0]` is the real part and `out[k, 1]` the imaginary part of output element k).
+      - `n`: Python `int`; the transform length (a power of two), always equal to the first dimension of the arrays above.
+      - Returns: `None` (results are written into `out`).
+  c_seq:
+    positional: "void fft(const float* x, float* out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: x[2*j] is the real part and x[2*j + 1] the imaginary part of input element j, for 0 <= j < n; out[2*k] and out[2*k + 1] are the real and imaginary parts of output element k.
+
+      - `x`: 2*n float32 values (real and imaginary part of element 0, then of element 1, ...), read-only. `out`: 2*n float32 values in the same layout, the output buffer that must be filled. Both start at 64-byte-aligned addresses.
+      - `n`: the transform length, a power of two, always equal to the actual number of complex elements in `x` and `out` (each buffer holds 2*n floats).
+      - Return value: none (results are written into `out`).
+  c_openmp:
+    positional: "void fft(const float* x, float* out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: x[2*j] is the real part and x[2*j + 1] the imaginary part of input element j, for 0 <= j < n; out[2*k] and out[2*k + 1] are the real and imaginary parts of output element k.
+
+      - `x`: 2*n float32 values (real and imaginary part of element 0, then of element 1, ...), read-only. `out`: 2*n float32 values in the same layout, the output buffer that must be filled. Both start at 64-byte-aligned addresses.
+      - `n`: the transform length, a power of two, always equal to the actual number of complex elements in `x` and `out` (each buffer holds 2*n floats).
+      - Return value: none (results are written into `out`).

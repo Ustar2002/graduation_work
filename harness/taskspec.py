@@ -18,11 +18,12 @@ signatures.yaml 의 관련 키::
 - ``kind``: ``in``(읽기 전용 배열) | ``out``(호출자가 할당한 출력 배열; 과제당 정확히 1개, float32 또는 int32) | ``dim``(C ``int`` 스칼라).
 - ``shape`` 원소는 정수 또는 dim 이름으로 된 식(예: ``"n_rows + 1"``). 테스트 npz 는 인자 이름으로 배열·스칼라를,
   ``<out>_ref`` 로 float64 참조를 담는다.
-- 식은 이 저장소의 신뢰된 파일에서만 오며, 내장 함수 없이 ``max``/``min`` 만 허용해 평가한다.
+- 식은 이 저장소의 신뢰된 파일에서만 오며, 내장 함수 없이 ``max``/``min``/``log2`` 만 허용해 평가한다.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,7 @@ class TaskSpec:
         if isinstance(expr, (int,)) and not isinstance(expr, bool):
             return int(expr)
         try:
-            value = eval(str(expr), {"__builtins__": {}, "max": max, "min": min}, dict(dims))  # noqa: S307 - 신뢰된 저장소 파일
+            value = eval(str(expr), {"__builtins__": {}, "max": max, "min": min, "log2": math.log2}, dict(dims))  # noqa: S307 - 신뢰된 저장소 파일
         except Exception as e:
             raise TaskSpecError(f"{self.task}: 식 {expr!r} 평가 실패 ({type(e).__name__}: {e}); dims={dims}") from None
         return int(value)

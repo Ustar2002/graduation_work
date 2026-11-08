@@ -185,3 +185,12 @@
 - **관찰 — 언어별 성능 결정**: numpy 는 네 과제 모두에서 라이브러리 한 줄(`bincount`/`cumsum`/`np.sort`)에 **`threading` 으로 청크를 병렬화**하는 패턴을 반복했다(histogram·scan 10/10, sort 2/5). 효과는 없었다(histogram 0.26, scan 0.38 — 단일 스레드 메모리 바운드 함수를 스레드로 나눠도 GIL 밖 구간이 짧다). C 는 scan 10/10 이 AVX2 + 2-pass, nbody 10/10 이 SoA + `rsqrt` 근사 + AVX2(c_seq 가 OpenMP 기준선의 1/3 시간, c_openmp 는 8배 — 기준선이 `sqrtf`/나눗셈 기반이라 약함). sort c_openmp 는 radix/병렬 분할로 `np.sort` 의 1.3~1.4배.
 - **관찰 — 격차의 성격**: Tier 1(gemm·dot)이 천장이었다면 Tier 2 는 과제마다 다른 축을 드러냈다: histogram·scan 은 numpy 의 위임 한계(라이브러리가 단일 스레드), nbody 는 numpy 의 수치 결정 실패(상쇄)와 C 의 공격적 근사 성공, sort 는 라이브러리가 이미 강해 격차가 작음. 통과율은 C 46/50 대 numpy 15/20 이지만 numpy 실패는 전부 한 과제에 몰려 있다.
 - **측정**: 플래그는 `baseline_drift`(sort 1행 +82 %, 일시적)와 `sibling_busy` 몇 건; `load_1m` 은 정보용. 기준선 대응 측정은 안정적(nbody drift ≤ 7 %).
+
+## 2026-11-09 (M2c — Tier 3 통합: cholesky, floyd_warshall, bfs, fft)
+
+- **구현 방식**: 과제별 에이전트 4개를 동시 실행(지난번 메모리 소진은 반박 단계의 14개 동시 실행이 원인이라 4개로 제한). 리뷰·반박 단계는 생략하고 구현자 보고의 실측·이탈을 아래에 기록한다. 각 과제는 자체 단위 테스트(총 262개 통과)와 워커 실측을 거쳤다.
+- **cholesky**: 참조 L 의 RMS 는 모든 형태에서 ≈1.1547(=√(4/3)) → atol ≈ 1.15e-3. 직진 float32 순차 구현 max_tol_ratio tiny 4.7e-5 / rect 5.7e-5 / small 2.2e-4 / large 3.9e-4(여유 500배). 기준선 `np.linalg.cholesky`(OpenBLAS spotrf)는 4스레드 187 ms·1스레드 207 ms(15 GFLOPS)로 **약한 라이브러리 기준선** — 단순 OpenMP 더미가 1.27배 빠르다(nbody 와 같은 해석 주의). §18 의 "대각 우세" 문구는 행합 기준으로는 성립하지 않아 spec 은 "조건수 ≈ 2.3 으로 양호" 로 서술했다. c_openmp 더미는 열이 아니라 행 병렬(row-major 연속 접근).
+- **floyd_warshall**: 밀도 0.3·시드 그대로의 tiny(n=5)는 2홉 경로가 하나도 없어 완화를 전혀 시험하지 못했다(복사만 하는 커널이 tiny 통과). **tiny 를 n=8 로 변경**(완화 27쌍·도달 불가 13쌍; test_hash 4e28f52e2f452399 → 2a9ff0da4e20355e). rect 이상에는 도달 불가 쌍이 없다. "정확히 INF" 는 허용오차 안에서 검사된다(2·INF 는 실패). 기준선 C+OpenMP large 48 ms(44 GFLOP/s), c_seq 더미 165 ms, numpy 더미 853 ms. k 루프 병렬화 변형은 3/3 `race_condition`.
+- **bfs**: tiny 의 행 길이 상한을 2 로 낮췄다(상한 32 를 n=7 로 클립하면 완전 그래프가 되어 다단계·−1 을 검사 못 함; spec 에 명시). 층화 추출 경계를 정수 산술로 바꿔 이웃 층 충돌 가능성을 없앴다 — **같은 잠재 결함이 `tasks/spmv_csr/gen_tests.py` 에도 있다**(현재 시드에서는 발생하지 않음; 데이터를 바꾸지 않기 위해 그대로 둔다). rect·small·large 에 도달 불가 정점 없음(평균 차수 16). 기준선 C+OpenMP large 103~110 ms, c_seq 큐 BFS 358 ms(1스레드 기준선 413 ms 보다 빠름), numpy 레벨 동기 1,250 ms. 원자 연산 없는 변형은 6/6 `race_condition`.
+- **fft**: NumPy 2.3.5 는 complex64 를 승격하지 않아 기준선 complex64 로 통과(ratio ≤ 4.6e-5). 직진 radix-2 float32 + double 트위들 더미 ratio ≤ 5.3e-4. **float32 점화식 트위들 변형은 large(2²²)에서만 실패**(ratio 1.43 → `numeric_instability`) — 트위들 정밀도가 실제 결정 사항. 기준선 pocketfft 단일 스레드 151 ms, c_openmp 더미 98~100 ms, c_seq 198 ms. 센티널 -1e9.
+- **`work` 식에 `log2` 허용**(`harness/taskspec.py`).

@@ -1,0 +1,37 @@
+# cholesky 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+task: cholesky
+function: cholesky
+params: [A, L, n]
+args:
+  - {name: A, kind: in,  dtype: float32, shape: [n, n]}
+  - {name: L, kind: out, dtype: float32, shape: [n, n]}
+  - {name: n, kind: dim}
+work: "n*n*n/3"                # Cholesky 분해의 부동소수 연산 수(n³/6 곱셈-덧셈 쌍 ≈ n³/3 flop; 하위 항 생략)
+baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: true, gate_min_gflops: false}
+languages:
+  numpy:
+    positional: "def cholesky(A, L, n):"
+    keyword:    "def cholesky(*, A, L, n):"
+    param_docs: |-
+      - `A`: `numpy.ndarray`, dtype float32, shape (n, n), C-contiguous, 64-byte aligned, read-only; `A[i, j]` is the entry in row i and column j (A is symmetric positive definite).
+      - `L`: `numpy.ndarray`, dtype float32, shape (n, n), C-contiguous, 64-byte aligned; the output buffer that must be completely filled: `L[i, j]` for j <= i is the Cholesky factor, `L[i, j]` for j > i must be set to 0.
+      - `n`: Python `int`; the matrix dimension, always equal to the array shapes above.
+      - Returns: `None` (the result is written into `L`).
+  c_seq:
+    positional: "void cholesky(const float* A, float* L, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access (row-major): A[i*n + j] and L[i*n + j] for 0 <= i, j < n.
+
+      - `A`: n*n float32 values, read-only (A is symmetric positive definite). `L`: n*n float32 values, the output buffer that must be completely filled: L[i*n + j] for j <= i is the Cholesky factor, L[i*n + j] for j > i must be set to 0. Both start at 64-byte-aligned addresses.
+      - `n`: the matrix dimension, always equal to the actual buffer sizes (both buffers hold n*n values).
+      - Return value: none (the result is written into `L`).
+  c_openmp:
+    positional: "void cholesky(const float* A, float* L, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access (row-major): A[i*n + j] and L[i*n + j] for 0 <= i, j < n.
+
+      - `A`: n*n float32 values, read-only (A is symmetric positive definite). `L`: n*n float32 values, the output buffer that must be completely filled: L[i*n + j] for j <= i is the Cholesky factor, L[i*n + j] for j > i must be set to 0. Both start at 64-byte-aligned addresses.
+      - `n`: the matrix dimension, always equal to the actual buffer sizes (both buffers hold n*n values).
+      - Return value: none (the result is written into `L`).

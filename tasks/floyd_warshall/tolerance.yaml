@@ -1,0 +1,10 @@
+# floyd_warshall 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float32 입력을 float64 로 올려 Floyd–Warshall 한 값).
+task: floyd_warshall
+dtype: float32
+rtol: 1.0e-4                   # 경로 길이는 1 ~ 수십(가중치 [1,10), 홉 수 ≤ 3 정도). float32 덧셈 ≤ 1024번이라도 누적 오차는 1e-5 수준
+atol: 1.0e-3                   # 고정(설계 §18). 거리 범위가 형태에 따라 크게 달라지지 않아 atol_rms_rel 은 쓰지 않는다
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20  # 모든 원소가 허용오차의 20배 이내로 틀리면 numeric_instability(imprecise), 아니면 wrong_output
+sentinel: -2048.0              # 출력 사전 채움값. 거리는 0 이상(INF 포함)이므로 정당한 값이 될 수 없음.
+                               # INF(1e30) 원소는 rtol·1e30 = 1e26 폭 안에서 비교된다: float32(1e30) 와 float64 1e30 의 차(1.5e22)는 통과,
+                               # INF+INF = 2e30 는 배율 1e4 > 20 이라 wrong_output/mismatch 로 떨어진다

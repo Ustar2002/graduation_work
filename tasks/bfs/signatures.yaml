@@ -1,0 +1,36 @@
+# bfs 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+# 정수 출력 과제(설계 §18): dist 는 int32, 정확 일치로 판정한다. work 는 두지 않는다(그래프 탐색 — gflops NA).
+task: bfs
+function: bfs
+params: [row_ptr, col_idx, dist, n, nnz]
+args:
+  - {name: row_ptr, kind: in,  dtype: int32, shape: ["n + 1"]}
+  - {name: col_idx, kind: in,  dtype: int32, shape: [nnz]}
+  - {name: dist,    kind: out, dtype: int32, shape: [n]}
+  - {name: n, kind: dim}
+  - {name: nnz, kind: dim}
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}
+languages:
+  numpy:
+    positional: "def bfs(row_ptr, col_idx, dist, n, nnz):"
+    keyword:    "def bfs(*, row_ptr, col_idx, dist, n, nnz):"
+    param_docs: |-
+      - `row_ptr`: `numpy.ndarray`, dtype int32, shape (n + 1,), C-contiguous, 64-byte aligned, read-only; row_ptr[0] == 0, row_ptr[n] == nnz, non-decreasing.
+      - `col_idx`: `numpy.ndarray`, dtype int32, shape (nnz,), C-contiguous, 64-byte aligned, read-only; the out-neighbours of vertex i are col_idx[row_ptr[i]:row_ptr[i+1]], strictly increasing within a row.
+      - `dist`: `numpy.ndarray`, dtype int32, shape (n,), 64-byte aligned; the output buffer that must be filled (every element: 0 for vertex 0, the hop count for reachable vertices, -1 for unreachable ones; its initial contents are arbitrary).
+      - `n`, `nnz`: Python `int`; the number of vertices and the number of edges, always equal to the array shapes above.
+      - Returns: `None` (the distances are written into `dist`).
+  c_seq:
+    positional: "void bfs(const int* row_ptr, const int* col_idx, int* dist, int n, int nnz)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `row_ptr`: n + 1 values of type `int` (32-bit), read-only; row_ptr[0] == 0, row_ptr[n] == nnz, non-decreasing. `col_idx`: nnz values of type `int`, read-only; the out-neighbours of vertex i are col_idx[row_ptr[i]] .. col_idx[row_ptr[i+1] - 1], strictly increasing within a row. `dist`: n values of type `int`, the output buffer that must be filled (every element: 0 for vertex 0, the hop count for reachable vertices, -1 for unreachable ones; its initial contents are arbitrary). All three start at 64-byte-aligned addresses.
+      - `n`, `nnz`: the number of vertices and the number of edges, always equal to the actual buffer sizes.
+      - Return value: none (the distances are written into `dist`).
+  c_openmp:
+    positional: "void bfs(const int* row_ptr, const int* col_idx, int* dist, int n, int nnz)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      - `row_ptr`: n + 1 values of type `int` (32-bit), read-only; row_ptr[0] == 0, row_ptr[n] == nnz, non-decreasing. `col_idx`: nnz values of type `int`, read-only; the out-neighbours of vertex i are col_idx[row_ptr[i]] .. col_idx[row_ptr[i+1] - 1], strictly increasing within a row. `dist`: n values of type `int`, the output buffer that must be filled (every element: 0 for vertex 0, the hop count for reachable vertices, -1 for unreachable ones; its initial contents are arbitrary). All three start at 64-byte-aligned addresses.
+      - `n`, `nnz`: the number of vertices and the number of edges, always equal to the actual buffer sizes.
+      - Return value: none (the distances are written into `dist`).

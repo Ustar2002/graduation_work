@@ -514,3 +514,23 @@ Python 시그니처는 같은 이름·순서(`def histogram(data, hist, n, nbins
 - `Tolerance.atol_rms_rel`(선택) → `classify.effective_tolerance(tol, ref)`; nbody 는 `atol_rms_rel: 1e-3`, `sentinel: -1e6`, spec 에 8 GiB 주소 공간 한도 명시.
 - 규칙 4c: 쓴 원소가 전부 맞을 때만 `partial_write`.
 - `paths.atomic_write_json` 은 비유한 실수를 null 로 쓴다(`allow_nan=False`).
+
+## 18. Tier 3 커널 계약 (2026-11-09)
+
+공통 규칙은 §17 과 같다(파일 구성, `harness.testgen`, 형태 이름 `tiny/rect/small/large`, spec 구조·언어 중립, 더미 k=0 ×3 언어, `tests/test_tier3_<task>.py`). 실수 출력 과제는 형태별 atol(`atol_rms_rel`)을 쓴다. `work` 식에 `log2` 를 쓸 수 있다.
+
+| 과제 | C 시그니처 | 입력 | 출력 | 형태 tiny / rect / small / large | 기준선 |
+|---|---|---|---|---|---|
+| `cholesky` | `void cholesky(const float* A, float* L, int n)` | `A` float32 n×n row-major, 대칭 양정치(생성: `B·Bᵀ + n·I`, B 는 uniform[-1,1) n×n, float64 로 만들어 float32 로 캐스트) | `L` float32 n×n 하삼각: `L·Lᵀ = A`, 대각 > 0, **엄격 상삼각은 0 으로 써야 함** | n = 6 / 131 / 512 / 2048 | NumPy `np.linalg.cholesky`(python; LAPACK potrf) |
+| `floyd_warshall` | `void floyd_warshall(const float* dist_in, float* dist_out, int n)` | `dist_in` float32 n×n, 대각 0, 간선 가중치 uniform[1,10), 간선 없음 = `INF = 1.0e30`(밀도 0.3) | `dist_out` 모든 쌍 최단거리; 도달 불가는 **정확히 INF** | n = 5 / 37 / 256 / 1024 | C+OpenMP (k 순차, i 병렬, j 벡터화) |
+| `bfs` | `void bfs(const int* row_ptr, const int* col_idx, int* dist, int n, int nnz)` | 방향 그래프 CSR(int32), 평균 차수 ≈ 16(행 길이 균등 0..32), 열 오름차순·유일 | `dist` int32: 정점 0 에서의 홉 수, 도달 불가 −1, `dist[0] = 0` | n = 7 / 1003 / 2¹⁶ / 2²¹ (nnz ≈ 16n) | C+OpenMP 레벨 동기 top-down(프론티어 병렬, 원자적 방문 표시) |
+| `fft` | `void fft(const float* x, float* out, int n)` | `x` float32 길이 2n, 교차 저장 복소수(x[2j]=실수부, x[2j+1]=허수부), uniform[-1,1), n 은 2 의 거듭제곱 | `out` 길이 2n 교차 저장: `X_k = Σ_j x_j·e^{−2πi jk/n}` (정방향, 스케일 없음) | n = 8 / 1024 / 2¹⁶ / 2²² | NumPy `np.fft.fft`(python, complex64) |
+
+Python 시그니처: `def cholesky(A, L, n):` (A, L 은 (n, n)), `def floyd_warshall(dist_in, dist_out, n):` ((n, n)), `def bfs(row_ptr, col_idx, dist, n, nnz):`, `def fft(x, out, n):` (x, out 은 (n, 2) float32 — 복소수 뷰는 구현의 선택).
+
+세부:
+- `cholesky`: tolerance `rtol 1e-3`, `atol_rms_rel 1e-3`, 센티널 -2048(L 원소 크기는 sqrt(n·3) 정도라 정당 범위 밖), `work "n*n*n/3"`, 참조는 float32 로 캐스트한 A 의 float64 Cholesky. spec 에 "A 는 대칭 양정치가 보장되며 대각 우세(조건수 작음)", "L 의 상삼각은 0 으로 채워야 한다(출력 전체 기록 규칙)" 명시. 직진 float32 구현(순차 j-k 루프)의 max_tol_ratio 를 측정해 ≤ 0.2 확인.
+- `floyd_warshall`: tolerance `rtol 1e-4`, `atol 1e-3`(고정; 거리 1~수십 범위), 센티널 -2048, `work "2*n*n*n"`. `INF` 는 spec 에 상수로 공개(1.0e30; `INF + INF` 가 float32 에서 유한). 참조는 float64 로 k 루프를 numpy 벡터화. 생성: 모든 정점이 도달 가능하지는 않도록(밀도 0.3 이면 거의 전부 도달) rect 이하에서는 밀도 0.3 그대로 두고 도달 불가 쌍이 있는지 테스트에서 확인만 한다.
+- `bfs`: 정수 출력 정확 일치(rtol=atol=0, ratio 0), 센티널 -2048. 참조는 numpy 레벨 동기 BFS(프론티어의 이웃을 `np.repeat`/누적합으로 벡터화). 생성은 spmv_csr 의 층화 추출을 재사용(`n_cols = n`). `work` 없음.
+- `fft`: tolerance `rtol 1e-3`, `atol_rms_rel 1e-3`, 센티널 -2048(출력 크기 ≤ n 이지만 n ≤ 2²² 이라 -2048 이 정당 값일 확률은 무시 가능하지 않다 → 센티널 **-1.0e9** 사용), `work "5*n*log2(n)"`. 참조 `np.fft.fft(float64 복소수)` 를 실수·허수 교차로 저장. spec 에 부호 규약·스케일·n 이 2 의 거듭제곱임을 명시, 비트 반전·복소수 표현은 자유.
+- 더미(정답)는 세 언어 × 4과제. C 기준선(floyd_warshall, bfs)은 샘플과 같은 플래그로 빌드된다.

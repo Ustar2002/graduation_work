@@ -1,0 +1,13 @@
+# fft 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float64 복소수 입력의 np.fft.fft 를 실수·허수로 나눠 저장한 값).
+task: fft
+dtype: float32
+rtol: 1.0e-3                   # float32 데이터·배정밀도 트위들의 radix-2 FFT 는 오차가 O(log2 n · ε) 수준이라 여유가 크다(실측은 아래 주석·README)
+atol: 0.0                      # 사용 안 함: 아래 atol_rms_rel 이 형태마다 atol 을 정한다
+atol_rms_rel: 1.0e-3           # 테스트마다 atol = 1e-3 × 그 형태 참조 출력(실수·허수 성분 전체)의 RMS. 입력이 uniform[-1,1) 이라 RMS ≈ sqrt(n/3)
+                               # (tiny 1.6, rect 18, small 148, large 1182 → atol 0.0016 / 0.018 / 0.15 / 1.18). 참조 성분 대부분이 이 크기라
+                               # 고정 atol 은 tiny 를 공허하게 하거나 large 에서 rtol 을 무력화한다(nbody 와 같은 이유).
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20  # 모든 원소가 허용오차의 20배 이내로 틀리면 numeric_instability(imprecise), 아니면 wrong_output
+sentinel: -1.0e+9              # 출력 사전 채움값. |X_k| ≤ Σ|x_j| ≤ √2·n ≈ 5.9e6 (n = 2²²) 이라 -2048 은 정당 값일 수 있어 쓰지 않는다.
+                               # -1e9 는 정당 범위 밖이면서 float32 ulp(64)가 입력 크기 ~1 에 대한 누적 판정을 흐리지만, 누적은 이 과제의
+                               # 자연스러운 버그가 아니므로(out 을 읽는 FFT 는 없다) 미기록·부분 기록 판정이 우선이다.

@@ -228,3 +228,9 @@ plugins/lint/run_lint.py --language <lang> --file <path> --task <task> --signatu
 - **형태별 허용오차**: `tolerance.yaml` 에 `atol_rms_rel` 이 있으면 테스트마다 `atol = atol_rms_rel × RMS(참조)` 를 쓴다(nbody). 적용값은 check/bench 문서의 `atol_effective`.
 - **nbody 센티널은 -1e6**(-1e30 은 덧셈을 흡수해 누적 커널이 '미기록'으로 보였다).
 - **JSON**: 비유한 실수(정수 과제의 배율 inf 등)는 결과 JSON 에 null 로 기록한다. CSV 의 `check_max_tol_ratio` 는 `inf` 문자열.
+
+## 부록 4: Tier 3 (2026-11-09)
+
+- `cholesky`·`fft` 는 실수 출력(형태별 atol), `floyd_warshall` 은 고정 atol 1e-3(거리 1~수십), `bfs` 는 정수 정확 일치. 2-D 출력(cholesky, floyd_warshall)에는 공통 `transposed_output` 패턴이 적용된다(Lᵀ 를 쓴 Cholesky 는 `arg_order`).
+- `floyd_warshall` 의 INF(1e30)는 허용오차 안에서 비교되므로 도달 불가 쌍에 2·INF 를 쓰면 `wrong_output/mismatch`.
+- `fft` 센티널은 -1e9(출력 크기가 n 까지 커질 수 있어 -2048 을 피함).

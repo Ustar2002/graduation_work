@@ -1,0 +1,40 @@
+# floyd_warshall 과제 시그니처 (기계 판독 부분은 harness/taskspec.py, param_docs 는 프롬프트에 그대로 들어간다).
+# Tier 3(설계 §18): 2-D float32 출력, 도달 불가 = INF(1.0e30) 정확히. work 는 k·i·j 삼중 루프의 덧셈+비교 = 2·n³.
+task: floyd_warshall
+function: floyd_warshall
+params: [dist_in, dist_out, n]
+args:
+  - {name: dist_in,  kind: in,  dtype: float32, shape: [n, n]}
+  - {name: dist_out, kind: out, dtype: float32, shape: [n, n]}
+  - {name: n, kind: dim}
+work: "2*n*n*n"
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}
+languages:
+  numpy:
+    positional: "def floyd_warshall(dist_in, dist_out, n):"
+    keyword:    "def floyd_warshall(*, dist_in, dist_out, n):"
+    param_docs: |-
+      - `dist_in`: `numpy.ndarray`, dtype float32, shape (n, n), C-contiguous, 64-byte aligned, read-only. `dist_in[i, j]` is the weight of the edge i -> j, 0 on the diagonal, or INF = 1.0e30 when there is no edge.
+      - `dist_out`: `numpy.ndarray`, dtype float32, shape (n, n), C-contiguous, 64-byte aligned; the output buffer that must be filled with the shortest-path lengths.
+      - `n`: Python `int`; the number of vertices, always equal to both dimensions of the arrays above.
+      - Returns: `None` (results are written into `dist_out`).
+  c_seq:
+    positional: "void floyd_warshall(const float* dist_in, float* dist_out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: dist_in[i*n + j], dist_out[i*n + j] for 0 <= i, j < n (row-major).
+
+      - `dist_in`: n*n float32 values, read-only. dist_in[i*n + j] is the weight of the edge i -> j, 0 on the diagonal, or INF = 1.0e30f when there is no edge.
+      - `dist_out`: n*n float32 values, the output buffer that must be filled with the shortest-path lengths. Both buffers start at 64-byte-aligned addresses.
+      - `n`: the number of vertices, always equal to the actual dimensions of the buffers.
+      - Return value: none (results are written into `dist_out`).
+  c_openmp:
+    positional: "void floyd_warshall(const float* dist_in, float* dist_out, int n)"
+    keyword: null        # M4: 매개변수 구조체
+    param_docs: |-
+      Element access: dist_in[i*n + j], dist_out[i*n + j] for 0 <= i, j < n (row-major).
+
+      - `dist_in`: n*n float32 values, read-only. dist_in[i*n + j] is the weight of the edge i -> j, 0 on the diagonal, or INF = 1.0e30f when there is no edge.
+      - `dist_out`: n*n float32 values, the output buffer that must be filled with the shortest-path lengths. Both buffers start at 64-byte-aligned addresses.
+      - `n`: the number of vertices, always equal to the actual dimensions of the buffers.
+      - Return value: none (results are written into `dist_out`).

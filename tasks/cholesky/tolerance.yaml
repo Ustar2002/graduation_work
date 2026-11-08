@@ -1,0 +1,9 @@
+# cholesky 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float32 로 캐스트한 A 의 float64 Cholesky 인자 L).
+task: cholesky
+dtype: float32
+rtol: 1.0e-3                   # 직진 float32 커널(순차 Cholesky–Banachiewicz, float32 누적·sqrtf·나눗셈)의 max_tol_ratio 실측(2026-11-09): tiny 4.7e-5, rect 5.7e-5, small 2.2e-4, large 3.9e-4 (≤ 0.2 계약 충족, 여유 500배 이상)
+atol: 0.0                      # 사용 안 함: 아래 atol_rms_rel 이 형태마다 atol 을 정한다
+atol_rms_rel: 1.0e-3           # 테스트마다 atol = 1e-3 × 그 형태 참조 L 전체(상삼각 0 포함)의 RMS. 실측 RMS ≈ 1.1547 (= sqrt(4/3): ‖L‖_F² = tr(A) ≈ 4n²/3) 모든 형태 → atol ≈ 1.15e-3
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20  # 모든 원소가 허용오차의 20배 이내로 틀리면 numeric_instability(imprecise), 아니면 wrong_output
+sentinel: -2048.0              # 출력 사전 채움값. |L| ≤ sqrt(max A_ii) ≈ sqrt(7n/3) ≈ 69 (large 실측 52.5) 라 정당 범위 밖; 미기록 상삼각(엄격 상삼각은 0 을 써야 한다)이 partial_write 로 잡힌다
