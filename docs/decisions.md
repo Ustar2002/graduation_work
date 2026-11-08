@@ -122,3 +122,12 @@
 - **Halide로 표현하기 어려운 커널(sort, BFS, prefix scan)** 은 M3에서 Halide를 넣을 때 정한다(해당 조합 제외 또는 Halide 대상 축소).
 - **린트**: 마감과 무관하게 필요해질 때 구현한다(사용자). M1·M2는 빈 결과로 진행.
 - **검증**: 단위 테스트 170개 통과. GEMM 더미 회귀 9행이 M1과 같은 분류. 새 과제 3개 × 언어 3개의 정답 더미 9행 모두 pass(기준선 포함 69초).
+
+## 2026-11-08 (M2a 첫 실제 실행 `20261108-tier1`)
+
+- **결과**: Tier 1 4과제 × 3언어 × 5샘플 = 60회, `claude-sonnet-5-5`. 생성 실패·절단·거절 0. pass 58/60. 속도비 중앙값(대응 기준선 대비): gemm numpy 0.99 / c_openmp 0.84 / c_seq 0.37; jacobi2d numpy 0.22 / c_openmp 1.51 / c_seq 0.62; spmv_csr numpy 0.12 / c_openmp 1.03 / c_seq 0.37; dot numpy 1.34 / c_openmp 1.45 / c_seq 1.01. 토큰 입력 174,650·출력 87,122(thinking 0), 비용 약 1.2달러.
+- **실패 2건은 둘 다 출력 형식 위반**(`extract/signature_mismatch`): jacobi2d/c_openmp/2 는 코드 블록 없이 설명만 내고 도구 호출 비슷한 XML(`<invoke name="x">`)로 끝났고, spmv_csr/c_seq/2 는 코드를 펜스 대신 `<parameter>` XML 안에 넣었다. 모델 쪽 실패이므로 행으로 남긴다. 추출기는 펜스 없는 본문을 코드로 보려다 설명문을 반환형으로 읽어 detail 이 길어졌다 — 분류는 맞지만 detail 을 `no_code_block` 으로 정리하는 것이 낫다(후속).
+- **관찰 — 언어별 성능 결정**: gemm 은 M1 과 같다(numpy 는 `np.matmul` 위임, C 는 블록화·패킹·AVX2 마이크로커널 10/10). jacobi2d 에서 처음으로 언어 차이가 보인다: numpy 는 슬라이싱 + T 루프(속도비 0.12~0.34; 단일 스레드 메모리 바운드), c_seq 는 ping-pong + 일부 타일링(0.52~0.88), c_openmp 는 행 분할 + simd(0.75~1.57, 시간적 블로킹 시도 1건은 형식 실패). spmv_csr 은 numpy 가 `np.add.reduceat`(0.10~0.44) 로 어색하게 위임하고, C 는 10/10 이 AVX2 gather 를 썼다. dot 은 모든 언어가 기준선(`np.dot`, 단일 스레드 sdot)과 같거나 빠르다 — 기준선이 약해 Tier 1 중 유일하게 속도비가 1 을 넘는다. 누적 정밀도 함정은 모두 피했다(C 15/15 가 float32 다중 누산기 또는 double 누산기; 실패 0).
+- **관찰 — 측정**: spmv_csr 행 14개에 `load_1m` 플래그가 붙었다. 원인은 직전 과제(jacobi2d)의 4스레드 bench 가 올린 1분 load average 를 다음 과제의 동적 검사가 그대로 읽은 것 — 자기 부하다. `pinned_busy`/`sibling_busy`(1초 실측)는 깨끗했다. → **제안(규약 변경, 사용자 확인 필요)**: `load_1m` 은 기록만 하고 `protocol_ok` 에서 제외하거나, 동적 검사 전에 부하가 가라앉을 때까지(최대 N초) 기다린다. jacobi2d 한 행에 drift 60 % (대응 기준선 136.7 ms vs 중앙값 85 ms, 일시적) — 의도대로 플래그됨.
+- **관찰 — 비용·토큰**: 호출당 평균 입력 2.9k·출력 1.45k 토큰. numpy 응답은 짧고(수백 토큰) C 는 2~3k. 60회에 약 1.2달러 → 12과제 × 6언어 × 5샘플(360회)은 약 7달러 수준으로 예상.
+- **다음**: Tier 1 은 gemm·dot 에서 천장(pass 100 %, 속도비 ≈ 1)이고 jacobi2d·spmv_csr 에서 언어 차이가 보인다. Tier 2(histogram, prefix scan, n-body, sort)로 넘어가되 정수 출력 지원이 먼저 필요하다.

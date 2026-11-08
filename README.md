@@ -142,5 +142,5 @@ pandas로 읽어(`dtype=str, keep_default_na=False` 뒤 수동 변환) 행 키 �
 ## 9. 마일스톤 상태
 
 - **M1 (수직 슬라이스) — 완료(2026-11-05).** 더미 파이프라인 검증(11개 변형 일치, 단위 테스트 164개) 뒤 첫 실제 실행 `20261105-real`: `claude-sonnet-5-5` 9회 호출 모두 pass, 속도비 중앙값 numpy 1.01 / c_openmp 0.97 / c_seq 0.33, 비용 약 0.21달러. 관찰과 후속 제안은 `docs/decisions.md` "M1 완료" 절.
-- **M2a (Tier 1 커널) — 하네스 일반화와 더미 검증 완료(2026-11-05), 실제 호출 대기.** 과제 `gemm`, `jacobi2d`, `spmv_csr`, `dot`; 단위 테스트 170개; 실제 실행은 4과제 × 3언어 × 5샘플 = 60회 호출(`run.n_samples`를 5로 올린 뒤 `make real`).
+- **M2a (Tier 1 커널) — 완료(2026-11-08).** 실제 실행 `20261108-tier1`: 60회 호출 중 58 pass(실패 2건은 출력 형식 위반), 비용 약 1.2달러. 결과 해석은 `docs/decisions.md` "M2a 첫 실제 실행" 절.
 - M2b·M2c(Tier 2·3 커널) → M3 언어 확장(numba, halide, rust) → M4 마이크로 조건·수정 루프 → M5 perf_summary·ASan/UBSan·린트 → M6 분석·그래프·대시보드 → M7 확장. 앞 단계 결과를 보고 다음 단계를 넣는다(CLAUDE.md 원칙 1).
