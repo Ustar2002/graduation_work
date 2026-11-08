@@ -42,7 +42,8 @@ FIX_GOVERNOR = "sudo cpupower frequency-set -g performance"
 FIX_EPP = "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference"
 
 # 정보용 플래그(ok 판정에서 제외): turbo 상태, 사용자 환경의 스레드 변수 제거 알림
-INFO_FLAG_PREFIXES: tuple[str, ...] = ("turbo=", "env_overrides_dropped")
+# load_1m 은 2026-11-08 부터 정보용: 직전 샘플의 4스레드 bench 가 올린 1분 평균을 다음 검사가 읽는 자기 부하라 판정에서 뺀다(decisions.md).
+INFO_FLAG_PREFIXES: tuple[str, ...] = ("turbo=", "env_overrides_dropped", "load_1m=")
 
 # 워커 환경 화이트리스트(상속 허용)와 고정값, 제거 대상 접두
 ENV_INHERIT: tuple[str, ...] = ("PATH", "HOME", "LANG", "TMPDIR", "VIRTUAL_ENV")

@@ -44,8 +44,26 @@ class TaskSpecTest(unittest.TestCase):
             parse_taskspec({**base, "params": ["o", "x", "n"]})  # 순서 불일치
         with self.assertRaises(TaskSpecError):
             parse_taskspec({"task": "t", "args": [{"name": "x", "kind": "in", "dtype": "float32", "shape": ["n"]}]})  # 출력 없음
-        with self.assertRaises(TaskSpecError):
-            parse_taskspec({"task": "t", "args": [{"name": "o", "kind": "out", "dtype": "int32", "shape": [1]}]})  # 정수 출력(M2 미지원)
+        spec = parse_taskspec({"task": "t", "args": [{"name": "o", "kind": "out", "dtype": "int32", "shape": [1]}]})  # 정수 출력(Tier 2)
+        self.assertEqual(spec.output.dtype, "int32")
+
+
+class IntOutputTest(unittest.TestCase):
+    """정수 출력(histogram/scan/sort)은 rtol = atol = 0 으로 정확 일치를 요구한다."""
+
+    EXACT = Tolerance(rtol=0.0, atol=0.0, numeric_pattern_tol_ratio=0.0, sentinel=-2048.0)
+
+    def test_exact_match_and_mismatch(self):
+        ref = np.array([3, 0, 7, 1], dtype=np.float64)
+        self.assertEqual(classify_task("histogram", np.array([3, 0, 7, 1], np.int32), ref, {}, {}, self.EXACT)[0], "pass")
+        st, pat, m = classify_task("histogram", np.array([3, 0, 8, 1], np.int32), ref, {}, {}, self.EXACT)
+        self.assertEqual((st, pat), ("wrong_output", "mismatch"))
+        self.assertEqual(m["n_fail"], 1)
+        self.assertTrue(np.isinf(m["max_tol_ratio"]))
+        st, pat, _ = classify_task("histogram", np.array([-2048, -2048, -2048, -2048], np.int32), ref, {}, {}, self.EXACT)
+        self.assertEqual((st, pat), ("wrong_output", "output_not_written"))
+        st, pat, _ = classify_task("histogram", np.array([3, 0, -2048, 1], np.int32), ref, {}, {}, self.EXACT)
+        self.assertEqual((st, pat), ("wrong_output", "partial_write:1/4"))
 
 
 class ClassifyTaskTest(unittest.TestCase):

@@ -131,3 +131,11 @@
 - **관찰 — 측정**: spmv_csr 행 14개에 `load_1m` 플래그가 붙었다. 원인은 직전 과제(jacobi2d)의 4스레드 bench 가 올린 1분 load average 를 다음 과제의 동적 검사가 그대로 읽은 것 — 자기 부하다. `pinned_busy`/`sibling_busy`(1초 실측)는 깨끗했다. → **제안(규약 변경, 사용자 확인 필요)**: `load_1m` 은 기록만 하고 `protocol_ok` 에서 제외하거나, 동적 검사 전에 부하가 가라앉을 때까지(최대 N초) 기다린다. jacobi2d 한 행에 drift 60 % (대응 기준선 136.7 ms vs 중앙값 85 ms, 일시적) — 의도대로 플래그됨.
 - **관찰 — 비용·토큰**: 호출당 평균 입력 2.9k·출력 1.45k 토큰. numpy 응답은 짧고(수백 토큰) C 는 2~3k. 60회에 약 1.2달러 → 12과제 × 6언어 × 5샘플(360회)은 약 7달러 수준으로 예상.
 - **다음**: Tier 1 은 gemm·dot 에서 천장(pass 100 %, 속도비 ≈ 1)이고 jacobi2d·spmv_csr 에서 언어 차이가 보인다. Tier 2(histogram, prefix scan, n-body, sort)로 넘어가되 정수 출력 지원이 먼저 필요하다.
+
+## 2026-11-08 (사용자 승인·Tier 2 시작)
+
+- **`load_1m` 플래그는 기록만 한다(사용자 승인; 측정 규약 변경)**: `protocol_ok` 계산에서 제외(정보용 접두 `load_1m=`). 근거: 직전 샘플의 4스레드 bench 가 올린 1분 load average 를 다음 샘플의 동적 검사가 읽는 자기 부하였다(20261108-tier1 의 spmv_csr 14행). 외부 간섭은 1초 실측 `pinned_busy`/`sibling_busy` 가 직접 잡는다.
+- **펜스 없는 응답의 detail**: 추출기가 산문을 반환형으로 읽어 길어지던 detail 을 `no_code_block;<80자>` 로 요약한다. 분류(`signature_mismatch`)는 그대로.
+- **정수 출력 지원**: `taskspec` 가 int32 출력을 허용하고, `compare` 는 허용오차 0 에서 틀린 원소를 배율 inf 로 둔다(정확 일치 요구; `numeric_instability` 불가). 정수 출력의 센티널은 -2048.
+- **Tier 2 계약 확정**(`docs/harness_design.md` §17): `histogram`(균등 분포 데이터; 0 초기화는 커널 책임), `scan`(int32 inclusive, 입력 `[0,32)` 로 2³¹ 안), `nbody`(AoS 입력·출력, EPS2=1e-4, G=1, j=i 항 포함 가능, 센티널 -1e30, atol 은 참조 RMS 기반), `sort`(int32 비음수 전범위, 기준선 `np.sort`). 부동소수 누적 함정이 알고리즘 결정과 섞이지 않게 `scan` 은 정수로 한다(실수 prefix sum 은 dot 과 같은 정밀도 문제가 모든 원소에 생긴다).
+- **기준선 선택**: histogram·scan·nbody 는 손으로 쓴 C+OpenMP(라이브러리가 단일 스레드이거나 없음), sort 는 `np.sort`(단일 스레드; 병렬 정렬은 속도비 > 1 이 정상 — dot 과 같은 해석).

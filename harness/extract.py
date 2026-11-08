@@ -442,6 +442,9 @@ def extract(
             text = _expand_object_defines(_strip_c_comments(code))
         sig_ok, exact, sig_detail = _check_c(text, function, params, _expected_c_prototype(signature_spec))
 
+    if "bare_code" in notes and sig_ok is False:
+        # 펜스 없는 응답(설명문 + 코드 조각)은 시그니처 검사가 산문을 읽어 detail 이 길어진다 → 형식 위반으로 짧게 요약(2026-11-08)
+        sig_detail = "no_code_block;" + sig_detail[:80]
     parts = ([sig_detail] if sig_detail else []) + notes + extra
     return ExtractResult(
         ok=sig_ok is not False,

@@ -483,3 +483,26 @@ make aggregate
 - **기준선**: 과제 명세가 정한다. C 기준선은 run마다 샘플과 같은 플래그로 빌드해 워커로 측정한다. BLAS·gflops 게이트는 과제가 켠 경우에만.
 - **drift**: run 끝에서 과제별 대응 기준선 중앙값 기준으로 계산한다.
 - **제약**: 출력은 float32 배열 1개, 스칼라 인자는 `int`. 정수 출력·복수 출력은 Tier 2에서 추가한다.
+
+## 17. Tier 2 커널 계약 (2026-11-08)
+
+공통: §16의 과제 일반 계약을 그대로 따른다. 각 과제는 `tasks/<task>/{spec.md, signatures.yaml, tolerance.yaml, gen_tests.py, baseline/}` 와 `harness/dummy_responses/<task>/<lang>/0.md`(정답), `tests/test_tier2_<task>.py` 를 갖는다. `gen_tests.py` 는 `harness.testgen` 을 쓰고 형태 이름은 `tiny, rect, small, large`. `spec.md` 는 Tier 1 과 같은 구조(Definition / Data layout / Contract / Accuracy / Evaluation / Goal), 영어, 언어 중립, 라이브러리 무언급, 평가 형태·절차·허용오차 공개. `param_docs` 는 Tier 1 의 문체를 따른다(`tasks/dot/signatures.yaml` 참고).
+
+**정수 출력**(histogram, scan, sort): `tolerance.yaml` 은 `rtol: 0.0, atol: 0.0, numeric_pattern_tol_ratio: 0.0, sentinel: -2048.0`, spec 은 "exact equality" 를 요구한다. 하네스는 int32 출력을 정확 일치로 판정한다(`compare` 는 tol=0 에서 틀린 원소의 배율을 inf 로 둬 `numeric_instability` 가 되지 않는다). 출력 버퍼는 센티널로 채워져 넘어가므로 **0 초기화는 커널의 책임**이다(spec 에 명시).
+
+| 과제 | C 시그니처 | 입력 | 출력 | 형태 tiny / rect / small / large | 기준선 |
+|---|---|---|---|---|---|
+| `histogram` | `void histogram(const int* data, int* hist, int n, int nbins)` | `data` int32 n개, 값은 `[0, nbins)` 균등 | `hist` int32 nbins개, `hist[b]` = `data == b` 인 원소 수 | (n, nbins) = (13, 4) / (100003, 37) / (2²⁰, 256) / (2²⁵, 1024) | C+OpenMP: 스레드별 private 히스토그램 → 합산 |
+| `scan` | `void scan(const int* x, int* out, int n)` | `x` int32 n개, 값은 `[0, 32)` 균등 | `out[i] = Σ_{k≤i} x[k]` (inclusive; 합 < 2³¹) | n = 7 / 100003 / 2²⁰ / 2²⁵ | C+OpenMP: 블록 합 → 오프셋 → 블록 내 스캔(2-pass) |
+| `nbody` | `void nbody(const float* pos, const float* mass, float* acc, int n)` | `pos` float32 n×3 AoS(`pos[3*i+c]`), `[0,1)³` 균등; `mass` float32 n개, `[0.5, 1.5)` 균등 | `acc` float32 n×3: `acc_i = Σ_{j=0}^{n-1} mass[j]·(p_j − p_i) / (|p_j − p_i|² + EPS2)^{3/2}`, `EPS2 = 1e-4`, G = 1 (j = i 항은 정확히 0 이라 포함해도 된다) | n = 5 / 301 / 2048 / 16384 | C+OpenMP: i 병렬, j 내부 루프 스칼라 `1.0f/sqrtf`, AoS 그대로 |
+| `sort` | `void sort(const int* x, int* out, int n)` | `x` int32 n개, `[0, 2³¹−1]` 균등(중복 가능) | `out` = `x` 의 오름차순 정렬 | n = 7 / 100003 / 2²⁰ / 10⁷ | NumPy `np.sort` (python; `gate_blas: false`) |
+
+Python 시그니처는 같은 이름·순서(`def histogram(data, hist, n, nbins):` 등); 배열은 위 형태의 ndarray(`pos`/`acc` 는 `(n, 3)`), dim 은 `int`. 반환값 None.
+
+세부:
+- `histogram`/`scan`/`sort` 는 `work` 를 두지 않는다(gflops NA). `nbody` 는 `work: "20*n*n"`.
+- `nbody` 허용오차: `rtol: 1.0e-3`, `atol` = 1e-3 × (large 참조 `acc` 성분의 RMS) 를 유효숫자 1자리로 반올림한 값(주석에 RMS 실측치 기록), `sentinel: -1.0e30`(가속도 값이 수천을 넘을 수 있어 -2048 은 쓰지 않는다). 구현자는 (a) 직진 float32 C 커널(`1.0f/sqrtf`)의 `max_tol_ratio` 가 모든 형태에서 0.2 이하임을, (b) 정제 없는 `_mm256_rsqrt_ps` 커널의 `max_tol_ratio` 를 측정해 `docs/decisions.md` 에 적는다. 참조는 float64 로 i 를 묶어(예: 256행) 정확히 계산한다(n=16384 에서 수십 초 허용).
+- `nbody` 의 2-D 출력 `(n, 3)` 에는 공통 `transposed_output` 패턴이 적용된다(SoA 로 쓴 출력이 이 패턴에 걸린다 — 의도된 arg_order).
+- 더미 응답: 과제마다 세 언어의 정답(k=0). `histogram/c_openmp/1.md` 는 보호 없는 `hist[data[i]]++` 병렬 루프(기대: `race_condition`; 결정적으로 틀리면 `wrong_output` — README 에 기록). `scan/c_openmp/1.md` 는 순차 의존을 무시한 `#pragma omp parallel for` 누적(기대: `race_condition` 또는 `wrong_output`).
+- 테스트(`tests/test_tier2_<task>.py`): gen_tests 2회 바이트 동일, 참조 손계산 대조(tiny), python 정답 커널의 worker check pass(tiny·rect), 심은 버그(예: histogram 0 초기화 누락 → `accumulated_into_c`; scan exclusive 스캔 → `wrong_output`; sort 내림차순 → `wrong_output`; nbody SoA 출력 → `arg_order/transposed_output`) 분류.
+- `config/experiment.yaml` 의 `run.tasks` 에 네 과제를 추가하고 `docs/error_taxonomy.md`·`README.md`·더미 README 의 표를 갱신한다.

@@ -44,7 +44,7 @@ SWAPPED_MN_MATCH_FRACTION = 0.99
 
 @dataclass(frozen=True)
 class Tolerance:
-    """``tasks/<task>/tolerance.yaml`` 의 값."""
+    """``tasks/<task>/tolerance.yaml`` 의 값. 정수 출력 과제는 rtol = atol = 0(정확 일치)으로 쓴다."""
 
     rtol: float
     atol: float
@@ -91,7 +91,8 @@ def compare(out: Any, ref64: Any, rtol: float, atol: float) -> dict[str, Any]:
     err = np.abs(o - r)
     tol = atol + rtol * np.abs(r)
     with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-        ratio = np.where(finite, err / tol, 0.0)
+        # tol == 0(정수 출력의 정확 일치)에서는 err == 0 → 0, err > 0 → inf (어떤 배율로도 '거의 맞음'이 아니다)
+        ratio = np.where(finite, np.where(err > 0, err / tol, 0.0), 0.0)
     fail = (~finite) | (err > tol)
     n_fail = int(np.count_nonzero(fail))
     if finite.any():

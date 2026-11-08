@@ -15,7 +15,7 @@ signatures.yaml 의 관련 키::
     out_guard_extra: "max(M,N)**2 - M*N"  # 출력 가드에 더할 원소 수(선택; arg_order 패턴용)
     baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: true, gate_min_gflops: true}
 
-- ``kind``: ``in``(읽기 전용 배열) | ``out``(호출자가 할당한 출력 배열; M2 는 과제당 정확히 1개) | ``dim``(C ``int`` 스칼라).
+- ``kind``: ``in``(읽기 전용 배열) | ``out``(호출자가 할당한 출력 배열; 과제당 정확히 1개, float32 또는 int32) | ``dim``(C ``int`` 스칼라).
 - ``shape`` 원소는 정수 또는 dim 이름으로 된 식(예: ``"n_rows + 1"``). 테스트 npz 는 인자 이름으로 배열·스칼라를,
   ``<out>_ref`` 로 float64 참조를 담는다.
 - 식은 이 저장소의 신뢰된 파일에서만 오며, 내장 함수 없이 ``max``/``min`` 만 허용해 평가한다.
@@ -124,8 +124,6 @@ def parse_taskspec(raw: dict[str, Any], path: Path | None = None) -> TaskSpec:
     outs = [a for a in args if a.kind == "out"]
     if len(outs) != 1:
         raise TaskSpecError(f"{path}: 출력 인자는 정확히 1개여야 한다(현재 {len(outs)}개)")
-    if outs[0].dtype != "float32":
-        raise TaskSpecError(f"{path}: M2 는 float32 출력만 지원한다(정수 출력은 Tier 2 에서 추가)")
     baseline = dict(DEFAULT_BASELINE)
     if isinstance(raw.get("baseline"), dict):
         baseline.update(raw["baseline"])

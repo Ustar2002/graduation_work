@@ -81,7 +81,8 @@ class FlagsTest(unittest.TestCase):
         self.assertTrue(flags_ok([]))
         self.assertTrue(flags_ok(["turbo=on", "env_overrides_dropped"]))
         self.assertFalse(flags_ok(["turbo=on", "governor=powersave"]))
-        self.assertFalse(flags_ok(["load_1m=2.4>2.0"]))
+        self.assertTrue(flags_ok(["load_1m=2.4>2.0"]))  # 2026-11-08: 자기 부하라 정보용
+        self.assertFalse(flags_ok(["pinned_busy=23.1%>10%"]))
 
     def test_blas_flag_label(self) -> None:
         self.assertEqual(blas_flag_label(""), "unknown")
