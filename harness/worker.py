@@ -299,6 +299,20 @@ def load_test(path: Path, spec: TaskSpec) -> dict[str, Any]:
 # ----------------------------------------------------------------------------- 시스템 샘플링
 
 
+def prewarm_blas_threads() -> None:
+    """OpenBLAS 스레드 풀을 **커널 로드 전에** 생성한다(2026-11-09).
+
+    libgomp 는 ``OMP_PROC_BIND=true`` 면 ``kernel.so`` 로드 시점에 주 스레드를 첫 코어에 묶는다. OpenBLAS(pthread 빌드)는
+    스레드를 처음 큰 호출 때 게으르게 만들므로, 그 호출이 커널 로드 뒤에 오면 워커 스레드들이 주 스레드의 1코어 마스크를
+    물려받아 기준선(np.linalg 등)이 한 코어에서 돌아 2배 느려졌다(cholesky 기준선 351 ms vs 190 ms 실측).
+    여기서 충분히 큰 sgemm 을 한 번 호출해 스레드 풀이 전체 고정 코어 마스크로 만들어지게 한다."""
+    try:
+        a = np.ones((512, 512), dtype=np.float32)
+        np.matmul(a, a)
+    except Exception as e:  # BLAS 가 없어도 측정은 계속한다
+        print(f"{_LOG} 경고: BLAS 스레드 예열 실패: {e}", file=sys.stderr)
+
+
 def pinned_cpus() -> list[int]:
     """현재 프로세스의 CPU 친화도(taskset 결과)."""
     try:
@@ -781,6 +795,7 @@ def main(argv: list[str] | None = None) -> int:
         limits["dumpable"] = dumpable
         doc["limits"] = limits
         doc["blas"] = blas_identity()
+        prewarm_blas_threads()  # OpenBLAS 스레드 풀을 커널 로드 전에 만든다(아래 docstring)
         doc["loadavg_start"] = loadavg_1m()
         # taskset 으로 고정된 CPU 집합. 커널 로드 전에 읽는다(OpenMP 런타임이 주 스레드 친화도를 좁히기 전).
         affinity = pinned_cpus()
