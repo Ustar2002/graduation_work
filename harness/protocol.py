@@ -424,6 +424,8 @@ def launch_env(cfg: Config, threads: int, *, openmp: bool) -> dict[str, str]:
     env["OMP_NUM_THREADS"] = n
     env["OPENBLAS_NUM_THREADS"] = n
     env["MKL_NUM_THREADS"] = n
+    # 교차 측정(커널·기준선 번갈아 호출)에서 OpenBLAS 스레드의 긴 스핀 대기가 커널 스레드와 코어를 다투지 않게 빨리 재운다
+    env["OPENBLAS_THREAD_TIMEOUT"] = str(int(getattr(cfg.measurement, "openblas_thread_timeout", 16)))
     if openmp:
         env.update({k: str(v) for k, v in cfg.measurement.omp_env_extra.items()})
     return env

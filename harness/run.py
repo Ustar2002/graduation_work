@@ -716,19 +716,42 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
     base_run = tctx.baseline_run or {}
     row.baseline_run_time_ms = base_run.get("median_ms")
     row.baseline_time_1t_ms = (tctx.baseline_1t or {}).get("median_ms")
-    paired_doc, poc = run_baseline_bench(ctx, tctx, threads=m.threads, out_name=f"paired_sample_{language}_{sample_idx}.json")
-    stages["paired_baseline"] = poc.summary()
-    ok, why = baseline_gate(paired_doc, None, require_openblas=_gate_opts(tctx))
-    if ok and paired_doc is not None:
-        row.baseline_time_ms = paired_doc.get("median_ms")
-        row.baseline_time_cv = paired_doc.get("cv")
-        row.baseline_samples_ms = {"warmup": list(paired_doc.get("warmup_ms") or []), "timed": list(paired_doc.get("timed_ms") or [])}
+    # 7-b. 교차 측정(2026-11-09): 커널과 기준선을 같은 워커에서 번갈아 호출한다. 그래서 bench 는 언어와 무관하게
+    #      measurement.cores(4코어)·measurement.threads 로 띄운다(c_seq 커널은 런타임이 없어 스레드 수에 영향받지 않고,
+    #      pthread 사용은 contract_violation 으로 따로 기록된다). check 단계의 언어별 고정은 그대로다.
+    bench_threads = m.threads
+    bench_openmp = openmp or (tctx.spec.baseline["backend"] == "c" and bool(tctx.spec.baseline.get("openmp")))
+    try:
+        b_artifact = baseline_artifact(ctx, tctx, ensure_dir(baseline_dir(cfg.paths.built_dir, ctx.run_id, tctx.task)))
+    except (BaselineError, FileNotFoundError) as e:
+        warn(f"{language}/sample_{sample_idx}: 기준선을 준비하지 못했다({e}); 교차 측정 없이 bench")
+        b_artifact = None
+    extra = bench_args(cfg)
+    if b_artifact is not None:
+        extra += ["--baseline-backend", str(tctx.spec.baseline["backend"]), "--baseline-artifact", str(b_artifact)]
+    oc = run_worker(cfg, stage="bench", threads=bench_threads, openmp=bench_openmp, backend=lang.backend, artifact=br.artifact,
+                    mode="bench", tests=[tctx.test_path(m.performance_test)], tolerance=tctx.tolerance_path, signatures=tctx.spec.path,
+                    out_path=sample_dir / "bench.json", cwd=sample_dir, timeout_s=m.bench_timeout_s,
+                    args_mode=row.args or "positional", extra=extra)
+    stages["bench"] = oc.summary()
+    if oc.stdout_bytes > 0:
+        add_violation(row, "stdout_output")
+    if oc.doc and oc.doc.get("blas"):
+        row.numpy_blas = blas_string(oc.doc.get("blas"))
+    row.threads = bench_threads
+    row.cores = m.cores
+    bdoc_i = (oc.doc or {}).get("baseline_interleaved")
+    if bdoc_i and bdoc_i.get("classification") == "pass" and bdoc_i.get("median_ms"):
+        row.baseline_time_ms = bdoc_i.get("median_ms")
+        row.baseline_time_cv = bdoc_i.get("cv")
+        row.baseline_samples_ms = {"warmup": list(bdoc_i.get("warmup_ms") or []), "timed": list(bdoc_i.get("timed_ms") or [])}
         # baseline_drift_pct 와 drift 플래그는 run 끝에서 정한다(patch_baseline_drift: 과제별 대응 기준선 중앙값 기준).
     else:
-        warn(f"{language}/sample_{sample_idx}: 대응 기준선 실패({why}); speedup_vs_baseline 은 NA")
-        add_flag(row, FLAG_PAIRED_FAILED)
+        why = (bdoc_i or {}).get("error_detail") or (bdoc_i or {}).get("classification") or "없음"
+        if (oc.doc or {}).get("classification") not in ("timeout", "runtime_crash"):
+            warn(f"{language}/sample_{sample_idx}: 교차 기준선 실패({why}); speedup_vs_baseline 은 NA")
+            add_flag(row, FLAG_PAIRED_FAILED)
 
-    oc = worker("bench", "bench", [tctx.test_path(m.performance_test)], m.bench_timeout_s, bench_args(cfg))
     row.bench_ran = True
     if oc.doc:
         apply_bench_doc(row, oc.doc)

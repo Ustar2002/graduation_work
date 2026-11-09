@@ -120,6 +120,7 @@ class MeasurementCfg:
     check_timeout_s: float
     bench_timeout_s: float
     max_worker_mem_gb: float
+    openblas_thread_timeout: int  # OpenBLAS 스레드가 호출 뒤 잠들기까지 2^N 사이클(기본 28 ≈ 0.1 s 스핀이 교차 측정 중 커널 스레드와 코어를 다퉜다; 2026-11-09)
     max_load_1m: float
     max_pinned_busy_pct: float
     require_performance_governor: bool
@@ -382,7 +383,7 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
         p,
         (
             "cores", "single_core", "threads", "omp_env_extra", "warmup", "repeats", "min_repeats", "check_repeats",
-            "check_timeout_s", "bench_timeout_s", "max_worker_mem_gb", "max_load_1m", "max_pinned_busy_pct",
+            "check_timeout_s", "bench_timeout_s", "max_worker_mem_gb", "openblas_thread_timeout", "max_load_1m", "max_pinned_busy_pct",
             "require_performance_governor", "baseline_min_gflops", "baseline_drift_pct_max", "correctness_tests",
             "performance_test",
         ),
@@ -427,6 +428,7 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
         check_timeout_s=_num(obj, p, "check_timeout_s", min_value=0.0, exclusive=True),
         bench_timeout_s=_num(obj, p, "bench_timeout_s", min_value=0.0, exclusive=True),
         max_worker_mem_gb=_num(obj, p, "max_worker_mem_gb", min_value=0.0, exclusive=True),
+        openblas_thread_timeout=int(_num(obj, p, "openblas_thread_timeout", min_value=1.0)) if "openblas_thread_timeout" in obj else 16,
         max_load_1m=_num(obj, p, "max_load_1m", min_value=0.0),
         max_pinned_busy_pct=_num(obj, p, "max_pinned_busy_pct", min_value=0.0),
         require_performance_governor=_bool(obj, p, "require_performance_governor"),

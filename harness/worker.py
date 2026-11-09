@@ -138,7 +138,7 @@ def _one_line(e: BaseException) -> str:
     return f"{type(e).__name__}: {msg[0] if msg else ''}".rstrip(": ")[:500]
 
 
-def load_kernel(backend: str, artifact: Path, args_mode: str, spec: TaskSpec) -> tuple[KernelHandle | None, str, str]:
+def load_kernel(backend: str, artifact: Path, args_mode: str, spec: TaskSpec, *, module_name: str = "kernel") -> tuple[KernelHandle | None, str, str]:
     """커널을 로드한다 → ``(handle, classification, detail)``. 실패하면 handle=None,
     classification ∈ ``compile_error`` | ``signature_mismatch``."""
     if backend == "c":
@@ -154,11 +154,11 @@ def load_kernel(backend: str, artifact: Path, args_mode: str, spec: TaskSpec) ->
         fn.restype = None
         return KernelHandle("c", fn, args_mode), "", ""
 
-    mspec = importlib.util.spec_from_file_location("kernel", str(artifact))
+    mspec = importlib.util.spec_from_file_location(module_name, str(artifact))
     if mspec is None or mspec.loader is None:
         return None, "compile_error", f"cannot create module spec for {artifact}"
     module = importlib.util.module_from_spec(mspec)
-    sys.modules["kernel"] = module
+    sys.modules[module_name] = module
     try:
         mspec.loader.exec_module(module)
     except BaseException as e:  # SystemExit/KeyboardInterrupt 도 임포트 실패로 본다
@@ -543,8 +543,13 @@ def run_bench(
     budget_s: float,
     writer: ResultWriter,
     cpus: list[int] | None = None,
+    baseline: KernelHandle | None = None,
 ) -> None:
     """성능 테스트 1개: 센티널 채움 1회 → warmup → timed. 적응·조기 종료 규칙은 설계 §8.
+
+    ``baseline`` 이 있으면(2026-11-09, 교차 측정) 커널과 기준선을 **같은 프로세스에서 번갈아 호출**한다: 호출 쌍마다 순서를
+    바꿔(k,b / b,k) 두 커널이 같은 클럭·열 상태를 보게 하고, 기준선 결과는 ``doc["baseline_interleaved"]`` 에 쓴다.
+    적응·조기 종료 규칙은 한 쌍(커널 + 기준선)의 시간으로 투영한다.
 
     ``cpus`` 는 주파수·스로틀 샘플링 대상 CPU(= taskset 으로 고정된 집합). **커널 로드 전에** 읽은 값을 넘겨야 한다:
     OpenMP 커널(libgomp)은 ``OMP_PROC_BIND=true`` 면 로드 시점에 주 스레드를 place 0(첫 코어)에 묶어
@@ -552,7 +557,9 @@ def run_bench(
     """
     doc = writer.doc
     name, path = test
-    bufs = Buffers(spec, load_test(path, spec), tol.sentinel)
+    data = load_test(path, spec)
+    bufs = Buffers(spec, data, tol.sentinel)
+    bbufs = Buffers(spec, data, tol.sentinel) if baseline is not None else None
     tol = effective_tolerance(tol, bufs.ref)
     cpus = pinned_cpus() if cpus is None else list(cpus)
 
@@ -567,25 +574,60 @@ def run_bench(
         "final_check": None, "inputs_mutated": None, "oob_write": None,
         "classification": None, "error_detail": "", "exception": None,
         "working_set_mb": bufs.working_set_mb(), "pinned_cpus": cpus,
+        "interleaved": baseline is not None,
     })
+    bdoc: dict[str, Any] | None = None
+    if baseline is not None and bbufs is not None:
+        bdoc = {"backend": baseline.backend, "warmup_ms": [], "timed_ms": [], "median_ms": None, "mean_ms": None, "min_ms": None,
+                "max_ms": None, "cv": None, "cpu_mhz_samples": [], "final_check": None, "inputs_mutated": None, "oob_write": None,
+                "classification": None, "error_detail": "", "exception": None}
+        doc["baseline_interleaved"] = bdoc
     throttle_start = throttle_count(cpus)
     doc["throttle_start"] = throttle_start
 
     bufs.restore_inputs()
     bufs.fill_sentinel()
+    if bbufs is not None:
+        bbufs.restore_inputs()
+        bbufs.fill_sentinel()
     n_warm, n_timed = warmup, repeats
     warm_done = timed_done = 0
     call_idx = 0
     C_first: np.ndarray | None = None
     last_ret: Any = None
+    last_bret: Any = None
     crashed = False
     early_exit = False
     writer.flush()
+
+    def _call_baseline(is_warm: bool) -> bool:
+        """기준선을 한 번 호출해 기록한다. 예외가 나면 bdoc 에 적고 False."""
+        assert baseline is not None and bbufs is not None and bdoc is not None
+        nonlocal last_bret
+        b_ms, bret, bexc = call_kernel(baseline, bbufs)
+        if bexc is not None:
+            bdoc["exception"] = bexc
+            bdoc["classification"] = "runtime_crash"
+            bdoc["error_detail"] = f"{bexc['type']}: {bexc['message']}".rstrip(": ")[:500]
+            return False
+        last_bret = bret
+        (bdoc["warmup_ms"] if is_warm else bdoc["timed_ms"]).append(b_ms)
+        if not is_warm:
+            bdoc["cpu_mhz_samples"].extend(cpu_mhz_samples(cpus))
+        return True
 
     while warm_done < n_warm or timed_done < n_timed:
         is_warm = warm_done < n_warm
         doc["in_progress"] = {"test": name, "call_idx": call_idx}
         writer.flush()
+        # 교차 측정: 쌍마다 순서를 바꾼다(짝수 쌍: 기준선 먼저, 홀수 쌍: 커널 먼저)
+        baseline_first = baseline is not None and call_idx % 2 == 0
+        b_ms_this = 0.0
+        if baseline_first:
+            t_b0 = time.perf_counter_ns()
+            if not _call_baseline(is_warm):
+                break
+            b_ms_this = (time.perf_counter_ns() - t_b0) / 1e6
         elapsed_ms, ret, exc = call_kernel(handle, bufs)
         if exc is not None:
             doc["exception"] = exc
@@ -608,10 +650,15 @@ def run_bench(
                     doc["nondeterministic_bitwise_runs"] += 1
                     if not outputs_close(bufs.out.view, C_first, tol):
                         doc["nondeterministic_runs"] += 1
+        if baseline is not None and not baseline_first:
+            t_b0 = time.perf_counter_ns()
+            if not _call_baseline(is_warm):
+                break
+            b_ms_this = (time.perf_counter_ns() - t_b0) / 1e6
 
         if call_idx == 0:
-            # 적응·조기 종료: 첫 호출 시간으로 예산을 투영한다
-            t1 = elapsed_ms / 1000.0
+            # 적응·조기 종료: 첫 쌍(커널 + 기준선)의 시간으로 예산을 투영한다
+            t1 = (elapsed_ms + b_ms_this) / 1000.0
             projected = t1 * (1 + min_repeats)
             if projected > BUDGET_FRACTION * budget_s:
                 doc["classification"] = "timeout"
@@ -635,6 +682,22 @@ def run_bench(
     throttle_end = throttle_count(cpus)
     doc["throttle_events"] = (throttle_end - throttle_start) if (throttle_start is not None and throttle_end is not None) else None
     doc["temp_c_end"] = package_temp_c()
+
+    if bdoc is not None and bbufs is not None and baseline is not None and bdoc.get("classification") != "runtime_crash":
+        bdoc.update(_stats(bdoc["timed_ms"]))
+        if bdoc["timed_ms"]:
+            bmut = bbufs.inputs_mutated()
+            boob = bbufs.oob_write()
+            bst, bpat, bmetrics = classify_task(spec.task, bbufs.out.view, bbufs.ref, bbufs.inputs0, bbufs.dims, tol,
+                                                oob_write=boob, return_type=_return_type(baseline, last_bret), out_full=bbufs.out.full)
+            bst, bpat = _apply_contract_flags(bst, bpat, mutated=bmut, oob=boob)
+            bdoc["final_check"] = {"classification": bst, "pattern": bpat, **bmetrics}
+            bdoc["inputs_mutated"] = bmut
+            bdoc["oob_write"] = boob
+            bdoc["classification"] = bst
+            bdoc["error_detail"] = bpat
+    elif bdoc is not None and bdoc.get("classification") != "runtime_crash":
+        bdoc["classification"] = "incomplete"
 
     if crashed or early_exit:
         writer.flush()
@@ -697,6 +760,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--budget-s", type=float, default=300.0)
     parser.add_argument("--args-mode", choices=("positional", "keyword"), default="positional")
     parser.add_argument("--max-mem-gb", type=float, default=8.0)
+    parser.add_argument("--baseline-backend", choices=("c", "python"), default=None, help="bench 교차 측정용 기준선 백엔드")
+    parser.add_argument("--baseline-artifact", type=Path, default=None, help="bench 교차 측정용 기준선(kernel .so 또는 .py)")
     return parser
 
 
@@ -750,9 +815,17 @@ def main(argv: list[str] | None = None) -> int:
             run_check(handle, spec, tests, tol, max(1, ns.check_repeats), writer)
         else:
             assert tol is not None
+            baseline_handle = None
+            if ns.baseline_artifact is not None:
+                bbackend = ns.baseline_backend or ("c" if ns.baseline_artifact.suffix == ".so" else "python")
+                baseline_handle, bcls, bdetail = load_kernel(bbackend, ns.baseline_artifact, "positional", spec, module_name="baseline_kernel")
+                doc["baseline_load"] = {"backend": bbackend, "artifact": str(ns.baseline_artifact), "ok": baseline_handle is not None,
+                                        "classification": bcls, "detail": bdetail}
+                if baseline_handle is None:
+                    print(f"{_LOG} 경고: 기준선 로드 실패({bcls}: {bdetail}); 교차 측정 없이 진행", file=sys.stderr)
             run_bench(handle, spec, tests[0], tol, warmup=max(0, ns.warmup), repeats=max(1, ns.repeats),
                       min_repeats=max(1, min(ns.min_repeats, ns.repeats)), budget_s=ns.budget_s, writer=writer,
-                      cpus=affinity)
+                      cpus=affinity, baseline=baseline_handle)
 
         doc["loadavg_end"] = loadavg_1m()
         doc["in_progress"] = None

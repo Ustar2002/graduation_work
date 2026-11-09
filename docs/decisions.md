@@ -208,3 +208,10 @@
 - **재측정 결과(기계를 식힌 뒤 cholesky·fft·floyd_warshall 만 `--force`)**: 노이즈는 그대로였다. 대응 기준선이 **거의 정확히 2배 차이 나는 두 상태**를 오간다(cholesky 175 ↔ 350 ms, fft 155 ↔ 350 ms, floyd 47 ↔ 96 ms; 단일 스레드 `np.fft` 도 160 ↔ 380 ms). 느린 상태의 `cpu_mhz_median` 은 1.3~2.4 GHz, 빠른 상태는 3.5~4.1 GHz → 지속 부하 뒤 P-core 클럭이 절반으로 떨어지는 전력·열 제한(노트북). 같은 샘플의 커널과 대응 기준선이 다른 상태에서 재어지면 속도비가 2배 틀어진다(예: fft c_openmp/4 6.9 → 15.4). bfs 구간(짧은 bench)은 양쪽 측정 모두 안정(drift ≤ 8 %).
 - **처리**: 첫 측정의 행 60개를 `results/runs_20261109-tier3_measurement1.csv` 로 보존하고 `results/runs.csv` 에는 재측정을 둔다. 정확성 결과는 두 측정에서 동일. cholesky·fft 의 속도비는 **2배 범위의 불확실성**을 갖는다고 읽어야 한다(둘 다 C 가 기준선보다 분명히 빠르다는 방향은 양쪽 측정에서 일치).
 - **제안(측정 규약 변경 — 사용자 확인 필요)**: (a) 커널과 대응 기준선을 **같은 워커 안에서 번갈아 호출**(ABAB)해 같은 클럭 상태에서 비교하거나, (b) bench 앞에 패키지 온도·클럭이 기준 아래로 내려올 때까지 대기(쿨다운)하거나, (c) 데스크탑으로 옮긴다. Tier 3 처럼 무거운 커널은 노트북에서 (a) 없이는 속도비 신뢰도가 낮다.
+
+## 2026-11-09 (측정 규약 변경 — 교차 측정; 사용자 승인 "1번")
+
+- **커널과 대응 기준선을 같은 워커 프로세스에서 번갈아 호출한다**(`harness.worker --baseline-artifact`, `run.py` bench 단계). 쌍마다 순서를 바꾸고(기준선→커널, 커널→기준선) warmup·timed 모두 쌍으로 진행한다. `baseline_time_ms`·`speedup_vs_baseline` 는 이 교차 기준선에서 온다. 적응·조기 종료 규칙은 한 쌍의 시간으로 투영한다. 결과 문서 `bench.json` 에 `interleaved: true`, `baseline_interleaved{…}`. 별도의 대응 기준선 워커 실행은 없앴다(run 시작·1스레드 기준선은 게이트용으로 유지).
+- **bench 는 언어와 무관하게 4코어·`measurement.threads` 로 띄운다**(기준선이 같은 프로세스에서 4스레드를 써야 하므로). c_seq 커널은 OpenMP 런타임이 없어 스레드 수의 영향을 받지 않고, pthread 사용은 `contract_violation` 으로 기록된다. check 단계의 언어별 고정(c_seq 단일 코어)은 그대로. 행의 `threads`·`cores` 열은 bench 환경(4, "0,2,4,6")을 적는다.
+- **OpenBLAS 스레드 스핀 대기 단축**(`OPENBLAS_THREAD_TIMEOUT=16`, config `measurement.openblas_thread_timeout`): 기본값(2²⁸ 사이클 ≈ 0.1 s)으로는 기준선 호출 뒤 OpenBLAS 스레드가 계속 돌며 다음 커널 호출의 OpenMP 스레드와 코어를 다퉜다 — 실측 gemm c_openmp 더미 31.6 ms(단독) → 51.9 ms(교차, 기본값) → 30.3 ms(교차, 16). 기준선 시간은 영향 없음(8.8~9.0 ms).
+- **재측정**: 네 실제 실행(`20261105-real`, `20261108-tier1`, `20261108-tier2`, `20261109-tier3`)의 측정 단계를 모두 `--force` 로 다시 수행한다(생성·raw 는 그대로 → API 비용 0). 이전 측정 행은 git 이력(커밋 d32a609 까지)과 `results/runs_20261109-tier3_measurement1.csv` 에 남는다.

@@ -54,6 +54,7 @@ measurement:
   check_timeout_s: 180
   bench_timeout_s: 300
   max_worker_mem_gb: 8         # RLIMIT_AS
+  openblas_thread_timeout: 16  # OpenBLAS 스레드 스핀 대기 2^N 사이클(기본 28). 교차 측정에서 기준선 스레드가 커널과 코어를 다투지 않게(2026-11-09)
   max_load_1m: 2.0
   max_pinned_busy_pct: 10.0    # 고정 코어·형제 코어의 사전 사용률(1초 샘플)
   require_performance_governor: true   # 아니면 경고 + governor_ok=0 (실험은 계속; --strict-protocol이면 중단)
