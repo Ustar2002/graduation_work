@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" class="in-text" version="1.0" demote-non-dropping-particle="sort-only" default-locale="en-US">
+  <!-- KCC 논문 양식의 참고문헌 규칙: 본문에는 번호를 쓰고, 인용한 순서대로
+       "저자, 제목, 학술지명, 권, 호, 쪽수, 발행년도" 순으로 적는다. -->
+  <info>
+    <title>KCC (KIISE conference) numeric</title>
+    <id>https://github.com/Ustar2002/graduation_work/report/interim/kcc.csl</id>
+    <category citation-format="numeric"/>
+    <updated>2026-11-11T00:00:00+09:00</updated>
+  </info>
+  <macro name="author">
+    <names variable="author">
+      <name initialize-with=". " delimiter=", " and="text" et-al-min="7" et-al-use-first="1"/>
+      <substitute>
+        <names variable="editor"/>
+      </substitute>
+    </names>
+  </macro>
+  <macro name="locators">
+    <group delimiter=", ">
+      <group delimiter=" ">
+        <text value="vol."/>
+        <text variable="volume"/>
+      </group>
+      <group delimiter=" ">
+        <text value="no."/>
+        <text variable="issue"/>
+      </group>
+      <group delimiter=" ">
+        <text value="pp."/>
+        <text variable="page"/>
+      </group>
+    </group>
+  </macro>
+  <macro name="year">
+    <date variable="issued">
+      <date-part name="year"/>
+    </date>
+  </macro>
+  <citation collapse="citation-number">
+    <sort>
+      <key variable="citation-number"/>
+    </sort>
+    <layout delimiter=", ">
+      <text variable="citation-number" prefix="[" suffix="]"/>
+    </layout>
+  </citation>
+  <bibliography entry-spacing="0" second-field-align="flush">
+    <layout suffix=".">
+      <text variable="citation-number" prefix="[" suffix="]"/>
+      <group delimiter=", ">
+        <text macro="author"/>
+        <text variable="title" quotes="true"/>
+        <text variable="container-title" font-style="italic"/>
+        <text macro="locators"/>
+        <text variable="URL"/>
+        <text macro="year"/>
+      </group>
+    </layout>
+  </bibliography>
+</style>

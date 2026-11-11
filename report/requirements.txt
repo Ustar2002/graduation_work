@@ -1,0 +1,4 @@
+# 보고서 빌드 전용(하네스 런타임과 분리): .venv/bin/pip install -r report/requirements.txt
+# 글꼴: Noto Serif CJK KR · Noto Sans CJK KR(본문·제목), NanumGothic(그림), DejaVu Sans Mono(식별자). Libertinus Serif 는 typst 에 내장.
+typst==0.15.2          # Typst 컴파일러의 파이썬 바인딩 (report/interim/*.typ → PDF)
+matplotlib>=3.11,<4    # 그림 2 (generated/fig_speedup.svg)

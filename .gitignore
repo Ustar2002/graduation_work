@@ -19,3 +19,5 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+# 보고서: 그림의 PNG 는 눈으로 확인하는 용도(조판은 SVG 를 쓴다)
+report/interim/generated/*.png

@@ -7,6 +7,7 @@
 #   make dummy [RUN_ID=…]          generate --provider dummy → run → aggregate --csv results/runs_dummy.csv
 #   make real RUN_ID=… [STRICT=1]  generate(확인 프롬프트) → run [--strict-protocol] → aggregate
 #   make aggregate [RUN_ID=…] [CSV=…]   RUN_ID 가 없으면 --latest
+#   make report                    중간보고서 PDF (report/interim/build.py; 먼저 `.venv/bin/pip install -r report/requirements.txt`)
 #
 # 모든 python 실행은 .venv/bin/python 이다(시스템 python3 는 `make venv` 에서 venv 를 만들 때만).
 # RUN_ID 기본값은 타임스탬프(dummy-YYYYmmdd-HHMMSS / YYYYmmdd-HHMMSS-real)이며 generate·run·aggregate 가 같은 값을 쓴다.
@@ -39,7 +40,7 @@ endif
 CSV ?=
 AGG_CSV := $(if $(CSV),--csv $(CSV),)
 
-.PHONY: help venv tests probe unittest dummy real aggregate
+.PHONY: help venv tests probe unittest dummy real aggregate report
 
 help:
 	@echo "make venv                       .venv 생성 + requirements.txt 설치 (SYSPY=$(SYSPY))"
@@ -49,6 +50,7 @@ help:
 	@echo "make dummy [RUN_ID=…]           더미 응답으로 전체 파이프라인 → results/runs_dummy.csv"
 	@echo "make real RUN_ID=… [STRICT=1]   실제 LLM 호출(확인 프롬프트) → results/runs.csv"
 	@echo "make aggregate [RUN_ID=…] [CSV=…]   결과 집계 (기본 --latest, results/runs.csv)"
+	@echo "make report                     중간보고서 PDF (results/runs.csv → report/interim/interim_report.pdf)"
 
 venv:
 	$(SYSPY) -m venv .venv && $(PIP) install -r requirements.txt
@@ -74,3 +76,7 @@ real:
 
 aggregate:
 	$(PYTHON) -m analysis.aggregate $(AGG_CSV) $(AGG_SELECT)
+
+# 중간보고서: runs.csv → 수치·그림 → Typst 조판. 본문 수치가 데이터와 다르면 빌드가 실패한다.
+report:
+	$(PYTHON) report/interim/build.py
