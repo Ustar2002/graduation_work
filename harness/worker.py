@@ -27,7 +27,7 @@ import traceback
 from ctypes import POINTER, c_float, c_int, c_int32
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 
@@ -104,6 +104,10 @@ class KernelHandle:
     backend: str
     fn: Callable[..., Any]
     args_mode: str
+    # bench 에서 이 코드를 호출하는 동안 주 스레드가 가질 CPU 집합(None = 건드리지 않는다). ``call_kernel`` 이 호출 직전에
+    # 적용하고 직후에 되돌린다(2026-11-11; 아래 ``set_main_affinity`` 참고).
+    call_cpus: tuple[int, ...] | None = None
+    affinity_error: str | None = None
 
     def invoke(self, bufs: "Buffers") -> Any:
         """커널을 한 번 호출한다. 반환값은 python 백엔드의 것(그 외 None)."""
@@ -321,6 +325,20 @@ def pinned_cpus() -> list[int]:
         return []
 
 
+def loaded_library(stem: str) -> str | None:
+    """이 프로세스에 매핑된 공유 객체 가운데 이름이 ``stem`` 으로 시작하는 것의 경로(없으면 None). 기록용:
+    libgomp 는 판(版)과 CPU 종류에 따라 병렬 구간 뒤 스핀 대기의 기본값이 다르다(decisions.md 2026-11-11)."""
+    try:
+        with open("/proc/self/maps", encoding="utf-8") as fh:
+            for line in fh:
+                path = line.rsplit(" ", 1)[-1].strip()
+                if path.startswith("/") and os.path.basename(path).startswith(stem):
+                    return os.path.realpath(path)
+    except OSError:
+        pass
+    return None
+
+
 def _read_int(path: Path) -> int | None:
     try:
         return int(path.read_text(encoding="utf-8").strip())
@@ -380,26 +398,67 @@ class ResultWriter:
         self.path = Path(path)
         self.doc = doc
 
-    def flush(self) -> None:
-        atomic_write_json(self.path, self.doc)
+    def flush(self, *, sync: bool = True) -> None:
+        """``sync=False``: 디스크 동기화(fsync) 없이 쓴다(bench 루프 안의 진행 기록용; ``run_bench`` 의 ``loop_fsync``)."""
+        atomic_write_json(self.path, self.doc, fsync=sync)
 
 
 # ----------------------------------------------------------------------------- 호출
 
 
+def set_main_affinity(cpus: Iterable[int]) -> tuple[set[int] | None, str | None]:
+    """호출 스레드(워커의 주 스레드)의 CPU 친화도를 ``cpus`` 로 바꾼다 → ``(이전 집합, 오류 문자열)``.
+
+    왜 필요한가(2026-11-11): 교차 측정에서는 커널과 기준선이 한 프로세스에 함께 로드된다. 둘 중 하나가 OpenMP 공유
+    객체면 libgomp 가 ``OMP_PROC_BIND=true`` 아래 로드 시점에 주 스레드를 place 0(CPU 하나)에 묶는다. 그 상태에서
+    파이썬 커널을 부르면 커널이 만든 스레드(``threading``, ``ThreadPoolExecutor``)가 1-CPU 마스크를 물려받아 4스레드
+    코드가 한 코어에서 돈다(실측: 스레드를 쓰는 numpy 커널의 bench 에서 cpu0 만 3.7 GHz, 나머지 고정 코어는 400 MHz).
+    그래서 OpenMP 가 아닌 코드를 부르는 동안에는 주 스레드의 친화도를 그 언어의 규약 집합(numpy: 고정 코어 전체,
+    c_seq: 고정 코어의 첫 CPU)으로 두고, 호출이 끝나면 직전의 집합(libgomp 가 정한 고정)으로 되돌린다. libgomp 는 주
+    스레드를 다시 묶지 않으므로 되돌리지 않으면 OpenMP 주 스레드가 떠돌아 병렬 구간이 느려진다(검토 실측 1.9배)."""
+    try:
+        prev = set(os.sched_getaffinity(0))
+        want = set(cpus)
+        if want and prev != want:
+            os.sched_setaffinity(0, want)
+        return prev, None
+    except (AttributeError, OSError, ValueError, OverflowError) as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _restore_main_affinity(prev: set[int] | None) -> str | None:
+    """``set_main_affinity`` 가 돌려준 이전 집합으로 되돌린다 → 오류 문자열 또는 None."""
+    if prev:
+        try:
+            if set(os.sched_getaffinity(0)) != prev:
+                os.sched_setaffinity(0, prev)
+        except (AttributeError, OSError, ValueError, OverflowError) as e:
+            return f"restore {type(e).__name__}: {e}"
+    return None
+
+
 def call_kernel(handle: KernelHandle, bufs: Buffers) -> tuple[float, Any, dict[str, Any] | None]:
-    """커널을 한 번 호출한다 → ``(elapsed_ms, return_value, exception|None)``. 어떤 BaseException 도 잡는다."""
+    """커널을 한 번 호출한다 → ``(elapsed_ms, return_value, exception|None)``. 어떤 BaseException 도 잡는다.
+
+    ``handle.call_cpus`` 가 있으면 호출 동안만 주 스레드 친화도를 그 집합으로 둔다(적용·복원은 시간 측정 구간 밖)."""
     exc: dict[str, Any] | None = None
     ret: Any = None
+    prev: set[int] | None = None
+    if handle.call_cpus is not None:
+        prev, err = set_main_affinity(handle.call_cpus)
+        if err is not None:
+            handle.affinity_error = err
     t0 = time.perf_counter_ns()
     try:
         ret = handle.invoke(bufs)
     except BaseException as e:  # 커널의 예외·SystemExit·KeyboardInterrupt 모두 runtime_crash
         t1 = time.perf_counter_ns()
+        handle.affinity_error = _restore_main_affinity(prev) or handle.affinity_error
         tb = _safe_format_exc()
         exc = {"type": type(e).__name__, "message": _safe_str(e)[:1000], "traceback": tb[-TRACEBACK_TAIL_CHARS:]}
         return (t1 - t0) / 1e6, None, exc
     t1 = time.perf_counter_ns()
+    handle.affinity_error = _restore_main_affinity(prev) or handle.affinity_error
     return (t1 - t0) / 1e6, ret, exc
 
 
@@ -558,8 +617,13 @@ def run_bench(
     writer: ResultWriter,
     cpus: list[int] | None = None,
     baseline: KernelHandle | None = None,
+    loop_fsync: bool = True,
 ) -> None:
     """성능 테스트 1개: 센티널 채움 1회 → warmup → timed. 적응·조기 종료 규칙은 설계 §8.
+
+    ``loop_fsync=False`` 면 호출 쌍 사이의 진행 기록을 디스크 동기화 없이 쓴다(마지막 기록은 언제나 동기화한다). 기본(True)은
+    2026-11-11 이전과 같은 동작이다: 쌍 사이에 fsync 두 번(이 머신에서 합계 13~20 ms 추정)이 끼어 쌍의 첫 호출만 유휴 뒤에
+    시작한다(검토 실측; 규약 변경 후보 — decisions.md 2026-11-11).
 
     ``baseline`` 이 있으면(2026-11-09, 교차 측정) 커널과 기준선을 **같은 프로세스에서 번갈아 호출**한다: 호출 쌍마다 순서를
     바꿔(k,b / b,k) 두 커널이 같은 클럭·열 상태를 보게 하고, 기준선 결과는 ``doc["baseline_interleaved"]`` 에 쓴다.
@@ -588,7 +652,7 @@ def run_bench(
         "final_check": None, "inputs_mutated": None, "oob_write": None,
         "classification": None, "error_detail": "", "exception": None,
         "working_set_mb": bufs.working_set_mb(), "pinned_cpus": cpus,
-        "interleaved": baseline is not None,
+        "interleaved": baseline is not None, "loop_fsync": bool(loop_fsync),
     })
     bdoc: dict[str, Any] | None = None
     if baseline is not None and bbufs is not None:
@@ -627,13 +691,13 @@ def run_bench(
         last_bret = bret
         (bdoc["warmup_ms"] if is_warm else bdoc["timed_ms"]).append(b_ms)
         if not is_warm:
-            bdoc["cpu_mhz_samples"].extend(cpu_mhz_samples(cpus))
+            bdoc["cpu_mhz_samples"].extend(cpu_mhz_samples(list(baseline.call_cpus) if baseline.call_cpus else cpus))
         return True
 
     while warm_done < n_warm or timed_done < n_timed:
         is_warm = warm_done < n_warm
         doc["in_progress"] = {"test": name, "call_idx": call_idx}
-        writer.flush()
+        writer.flush(sync=loop_fsync)
         # 교차 측정: 쌍마다 순서를 바꾼다(짝수 쌍: 기준선 먼저, 홀수 쌍: 커널 먼저)
         baseline_first = baseline is not None and call_idx % 2 == 0
         b_ms_this = 0.0
@@ -656,7 +720,8 @@ def run_bench(
         else:
             doc["timed_ms"].append(elapsed_ms)
             timed_done += 1
-            doc["cpu_mhz_samples"].extend(cpu_mhz_samples(cpus))
+            # 주파수는 그 코드가 실제로 쓴 CPU 에서 읽는다(순차 C 는 CPU 하나; 나머지 고정 코어는 유휴라 최솟값을 끌어내렸다)
+            doc["cpu_mhz_samples"].extend(cpu_mhz_samples(list(handle.call_cpus) if handle.call_cpus else cpus))
             if C_first is None:
                 C_first = bufs.out.view.copy()
             else:
@@ -687,7 +752,10 @@ def run_bench(
                 doc["repeats_reduced"] = True
                 print(f"{_LOG} 첫 호출 {elapsed_ms:.0f} ms → warmup={n_warm}, repeats={n_timed} 로 축소", file=sys.stderr)
         call_idx += 1
-        writer.flush()
+        aff_err = handle.affinity_error or (baseline.affinity_error if baseline is not None else None)
+        if aff_err and isinstance(doc.get("call_affinity"), dict):
+            doc["call_affinity"]["error"] = aff_err
+        writer.flush(sync=loop_fsync)
 
     doc["in_progress"] = None
     samples = doc["cpu_mhz_samples"]
@@ -776,7 +844,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-mem-gb", type=float, default=8.0)
     parser.add_argument("--baseline-backend", choices=("c", "python"), default=None, help="bench 교차 측정용 기준선 백엔드")
     parser.add_argument("--baseline-artifact", type=Path, default=None, help="bench 교차 측정용 기준선(kernel .so 또는 .py)")
+    parser.add_argument("--kernel-cpus", default="auto",
+                        help="bench: 커널을 호출하는 동안 주 스레드의 CPU 집합. 'auto'(python 백엔드는 taskset 집합 전체, C 는 그대로), "
+                             "'none'(건드리지 않는다; OpenMP 커널), 또는 CPU 목록(예: '0,2,4,6', '2')")
+    parser.add_argument("--baseline-cpus", default="auto", help="bench: 기준선 호출 동안의 주 스레드 CPU 집합(--kernel-cpus 와 같은 형식)")
+    parser.add_argument("--no-loop-fsync", action="store_true",
+                        help="bench: 호출 쌍 사이의 진행 기록을 fsync 없이 쓴다(기본은 fsync; measurement.bench_loop_fsync)")
     return parser
+
+
+def resolve_call_cpus(text: str | None, backend: str, pinned: list[int]) -> tuple[int, ...] | None:
+    """``--kernel-cpus`` / ``--baseline-cpus`` 값을 CPU 튜플로. 'auto': python 은 ``pinned``(커널 로드 전 taskset 집합), C 는 None."""
+    t = (text or "auto").strip().lower()
+    if t == "none":
+        return None
+    if t == "auto":
+        return tuple(pinned) if (backend == "python" and pinned) else None
+    cpus: set[int] = set()
+    for part in t.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cpus.update(range(int(lo), int(hi) + 1))
+        else:
+            cpus.add(int(part))
+    if not cpus:
+        raise ValueError(f"빈 CPU 목록: {text!r}")
+    return tuple(sorted(cpus))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -833,14 +929,51 @@ def main(argv: list[str] | None = None) -> int:
             baseline_handle = None
             if ns.baseline_artifact is not None:
                 bbackend = ns.baseline_backend or ("c" if ns.baseline_artifact.suffix == ".so" else "python")
+                # 파이썬 기준선은 고정 코어 전체에서 임포트한다: 커널이 OpenMP 면 주 스레드가 이미 CPU 하나에 묶여 있어, 기준선이
+                # 임포트 때 만드는 스레드가 그 마스크를 물려받는다(현재 기준선에는 그런 스레드가 없지만 순서에 기대지 않는다).
+                # C 기준선은 건드리지 않는다: OpenMP 면 libgomp 가 로드 시점에 주 스레드를 묶는데, 그 고정을 되돌리면 안 된다.
+                prev_load = None
+                if bbackend == "python" and affinity:
+                    prev_load, _ = set_main_affinity(affinity)
                 baseline_handle, bcls, bdetail = load_kernel(bbackend, ns.baseline_artifact, "positional", spec, module_name="baseline_kernel")
+                _restore_main_affinity(prev_load)
                 doc["baseline_load"] = {"backend": bbackend, "artifact": str(ns.baseline_artifact), "ok": baseline_handle is not None,
                                         "classification": bcls, "detail": bdetail}
                 if baseline_handle is None:
                     print(f"{_LOG} 경고: 기준선 로드 실패({bcls}: {bdetail}); 교차 측정 없이 진행", file=sys.stderr)
+            # 호출 동안의 주 스레드 친화도(2026-11-11): OpenMP 가 아닌 코드가 libgomp 의 1-CPU 고정을 물려받지 않게 한다.
+            # 요청한 집합은 커널 로드 전의 taskset 집합 안에 있어야 한다(밖이면 적용하지 않고 오류로 남긴다).
+            aff_errors: list[str] = []
+
+            def _checked(cpus: tuple[int, ...] | None, who: str) -> tuple[int, ...] | None:
+                if cpus is not None and affinity and not set(cpus) <= set(affinity):
+                    aff_errors.append(f"{who}: 요청 CPU {list(cpus)} 가 고정 집합 {affinity} 밖")
+                    return None
+                return cpus
+
+            handle.call_cpus = _checked(resolve_call_cpus(ns.kernel_cpus, ns.backend, affinity), "kernel")
+            if baseline_handle is not None:
+                baseline_handle.call_cpus = _checked(resolve_call_cpus(ns.baseline_cpus, baseline_handle.backend, affinity), "baseline")
+            main_after_load = pinned_cpus()        # 두 코드를 로드한 뒤의 주 스레드 집합(libgomp 가 좁혔으면 CPU 하나)
+            doc["call_affinity"] = {
+                "main_after_load": main_after_load,
+                "kernel": list(handle.call_cpus) if handle.call_cpus is not None else None,
+                "baseline": (list(baseline_handle.call_cpus) if baseline_handle is not None and baseline_handle.call_cpus is not None
+                             else None),
+                "main_after_bench": None,
+                "libgomp": loaded_library("libgomp"),
+                "error": "; ".join(aff_errors) or None,
+            }
             run_bench(handle, spec, tests[0], tol, warmup=max(0, ns.warmup), repeats=max(1, ns.repeats),
                       min_repeats=max(1, min(ns.min_repeats, ns.repeats)), budget_s=ns.budget_s, writer=writer,
-                      cpus=affinity, baseline=baseline_handle)
+                      cpus=affinity, baseline=baseline_handle, loop_fsync=not ns.no_loop_fsync)
+            main_after_bench = pinned_cpus()
+            doc["call_affinity"]["main_after_bench"] = main_after_bench
+            errs = [e for e in (doc["call_affinity"]["error"], handle.affinity_error,
+                                baseline_handle.affinity_error if baseline_handle is not None else None) if e]
+            if main_after_bench != main_after_load:
+                errs.append(f"주 스레드 친화도가 bench 뒤에 달라졌다: {main_after_load} → {main_after_bench}")
+            doc["call_affinity"]["error"] = "; ".join(dict.fromkeys(errs)) or None
 
         doc["loadavg_end"] = loadavg_1m()
         doc["in_progress"] = None

@@ -147,6 +147,58 @@ class LaunchTest(unittest.TestCase):
         self.assertNotIn("HOME", env)  # 사용자 환경에 없던 것은 생기지 않는다
 
 
+class CallCpusTest(unittest.TestCase):
+    """bench 에서 코드를 호출하는 동안의 주 스레드 CPU 집합(2026-11-11)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cfg = load_config()
+
+    def test_openmp_c_is_left_to_libgomp(self) -> None:
+        from harness.protocol import call_cpus
+        self.assertIsNone(call_cpus(self.cfg, backend="c", openmp=True, threads=self.cfg.measurement.threads))
+
+    def test_python_gets_all_pinned_cores(self) -> None:
+        from harness.protocol import call_cpus
+        self.assertEqual(call_cpus(self.cfg, backend="python", openmp=False, threads=self.cfg.measurement.threads),
+                         self.cfg.measurement.cores)
+
+    def test_sequential_c_gets_first_pinned_cpu(self) -> None:
+        """순차 C 는 고정 코어의 첫 CPU(= OpenMP 주 스레드의 place) 하나에서 돈다: libgomp 작업 스레드의 코어와 겹치지 않는다."""
+        from harness.protocol import call_cpus
+        first = str(parse_cpulist(self.cfg.measurement.cores)[0])
+        self.assertEqual(call_cpus(self.cfg, backend="c", openmp=False, threads=1), first)
+        self.assertEqual(call_cpus(self.cfg, backend="python", openmp=False, threads=1), first)
+
+    def test_call_cpus_stay_inside_the_bench_taskset(self) -> None:
+        """measurement.threads == 1 이면 bench 워커는 single_core 에 고정된다: 호출 CPU 도 그 안에서 골라야 한다."""
+        import dataclasses
+
+        from harness.protocol import bench_cpus, call_cpus, launch_prefix
+        cfg1 = dataclasses.replace(self.cfg, measurement=dataclasses.replace(self.cfg.measurement, threads=1))
+        self.assertEqual(bench_cpus(cfg1), cfg1.measurement.single_core)
+        self.assertEqual(bench_cpus(self.cfg), self.cfg.measurement.cores)
+        for cfg in (self.cfg, cfg1):
+            allowed = set(parse_cpulist(bench_cpus(cfg)))
+            prefix = launch_prefix(cfg, cfg.measurement.threads)
+            if prefix:
+                self.assertEqual(set(parse_cpulist(prefix[-1])), allowed)
+            for backend, openmp, threads in (("python", False, cfg.measurement.threads), ("c", False, 1), ("python", False, 1)):
+                got = call_cpus(cfg, backend=backend, openmp=openmp, threads=threads)
+                self.assertIsNotNone(got)
+                self.assertLessEqual(set(parse_cpulist(got)), allowed, (backend, threads, got))
+
+    def test_worker_resolves_cpu_arguments(self) -> None:
+        from harness.worker import resolve_call_cpus
+        self.assertEqual(resolve_call_cpus("auto", "python", [0, 2, 4, 6]), (0, 2, 4, 6))
+        self.assertIsNone(resolve_call_cpus("auto", "c", [0, 2, 4, 6]))
+        self.assertIsNone(resolve_call_cpus("none", "python", [0, 2]))
+        self.assertEqual(resolve_call_cpus("2", "c", [0, 2, 4, 6]), (2,))
+        self.assertEqual(resolve_call_cpus("0,2,4-6", "python", []), (0, 2, 4, 5, 6))
+        with self.assertRaises(ValueError):
+            resolve_call_cpus(",", "python", [0])
+
+
 class LiveChecksTest(unittest.TestCase):
     """실제 sysfs/proc 를 읽는 검사(이 머신에서 1초)."""
 

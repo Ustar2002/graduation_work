@@ -399,6 +399,36 @@ def launch_prefix(cfg: Config, threads: int) -> list[str]:
     return ["taskset", "-c", spec]
 
 
+# 호출 친화도 규칙의 판(版). 규칙을 바꾸면 올린다 — 환경 지문(env_hash)에 들어가 어느 규칙으로 잰 행인지 구분된다.
+CALL_AFFINITY_POLICY = "2026-11-11"
+
+
+def bench_cpus(cfg: Config) -> str:
+    """bench 워커가 taskset 으로 고정되는 CPU 목록(``launch_prefix(cfg, measurement.threads)`` 와 같은 집합)."""
+    return cfg.measurement.single_core if int(cfg.measurement.threads) == 1 else cfg.measurement.cores
+
+
+def call_cpus(cfg: Config, *, backend: str, openmp: bool, threads: int) -> str | None:
+    """bench(교차 측정)에서 그 코드를 **호출하는 동안** 워커의 주 스레드가 가져야 할 CPU 집합(taskset 목록 문자열).
+
+    - OpenMP C 코드: ``None`` — libgomp 가 ``OMP_PROC_BIND``·``OMP_PLACES`` 로 정한 고정(주 스레드 = place 0)을 그대로 둔다.
+    - 스레드를 쓸 수 있는 그 밖의 코드(python): bench 워커의 고정 코어 전체. 프롬프트에 적은 환경(고정 코어 전체, 스레드 수)과 같다.
+    - 순차 코드(``threads == 1``; c_seq): 고정 코어의 첫 CPU 하나. 프롬프트의 "코어 1개에 고정"과 같다. 첫 CPU 는 OpenMP 주
+      스레드의 place 이자 워커의 주 스레드가 이미 돌던 CPU 라서, 호출마다 식은 코어로 옮겨 가지 않고(검토 실측: 다른 코어로
+      옮기면 +36 %) libgomp 작업 스레드의 코어(나머지 place)와도 겹치지 않는다. check 단계의 ``single_core`` 는 프로세스
+      전체를 taskset 으로 고정하는 별도 규약이다.
+
+    왜 필요한가: 교차 측정에서는 한 프로세스에 OpenMP 공유 객체가 함께 로드되면 libgomp 가 주 스레드를 CPU 하나에 묶는다.
+    OpenMP 가 아닌 코드를 부를 때 이 집합을 적용해야 그 코드가 만드는 스레드가 1-CPU 마스크를 물려받지 않는다
+    (2026-11-11, docs/decisions.md). 반환값은 언제나 ``bench_cpus(cfg)`` 의 부분집합이다."""
+    if backend == "c" and openmp:
+        return None
+    pinned = bench_cpus(cfg)
+    if int(threads) == 1:
+        return str(parse_cpulist(pinned)[0])
+    return pinned
+
+
 def launch_env(cfg: Config, threads: int, *, openmp: bool) -> dict[str, str]:
     """워커 환경: 화이트리스트(PATH, HOME, LANG, TMPDIR, VIRTUAL_ENV 상속; LC_ALL=C, PYTHONHASHSEED=0, PYTHONPATH=ROOT)
     + 스레드 변수(OMP/OPENBLAS/MKL_NUM_THREADS=threads) + (openmp 이면) ``measurement.omp_env_extra``.
@@ -807,6 +837,8 @@ def environment_fingerprint(cfg: Config, machine: dict[str, Any], static: Static
         "single_core": cfg.measurement.single_core,
         "threads": cfg.measurement.threads,
         "omp_env": dict(cfg.measurement.omp_env_extra),
+        "call_affinity_policy": CALL_AFFINITY_POLICY,
+        "bench_loop_fsync": bool(cfg.measurement.bench_loop_fsync),
         "governor": static.governor,
         "epp": static.epp,
         "no_turbo": static.no_turbo,

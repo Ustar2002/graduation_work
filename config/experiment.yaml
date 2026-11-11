@@ -44,7 +44,7 @@ build:
 
 measurement:
   cores: "0,2,4,6"             # taskset -c (P-core 4개, SMT 형제 제외)
-  single_core: "2"             # threads==1 언어의 taskset (cpu0은 IRQ가 몰려 회피)
+  single_core: "2"             # threads==1 언어의 import·check 단계 taskset. bench 는 cores 로 뜨고 c_seq 커널은 호출 동안 cores 의 첫 CPU 에 묶인다(docs/protocol.md §10.1)
   threads: 4                   # OMP_NUM_THREADS / OPENBLAS_NUM_THREADS / MKL_NUM_THREADS
   omp_env_extra: {OMP_PROC_BIND: "true", OMP_PLACES: "cores", OMP_DYNAMIC: "false"}   # OpenMP 백엔드 워커에만
   warmup: 3
@@ -55,6 +55,7 @@ measurement:
   bench_timeout_s: 300
   max_worker_mem_gb: 8         # RLIMIT_AS
   openblas_thread_timeout: 16  # OpenBLAS 스레드 스핀 대기 2^N 사이클(기본 28). 교차 측정에서 기준선 스레드가 커널과 코어를 다투지 않게(2026-11-09)
+  bench_loop_fsync: true       # bench 호출 쌍 사이의 진행 기록을 fsync 할지. false 는 규약 변경 후보(미승인; decisions.md 2026-11-11 (b))
   max_load_1m: 2.0
   max_pinned_busy_pct: 10.0    # 고정 코어·형제 코어의 사전 사용률(1초 샘플)
   require_performance_governor: true   # 아니면 경고 + governor_ok=0 (실험은 계속; --strict-protocol이면 중단)

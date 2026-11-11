@@ -102,5 +102,53 @@ class NeedsProcessingTest(unittest.TestCase):
         self.assertFalse(needs_processing(self._ctx(), "gemm", self.raw))
 
 
+class BenchPlanTest(unittest.TestCase):
+    """교차 bench 의 실행 계획(run.bench_plan): 언어 × 기준선 여섯 조합의 워커 환경·호출 CPU·행 기록(2026-11-11)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from harness.config import load_config
+        cls.cfg = load_config()
+
+    def test_six_language_baseline_combinations(self) -> None:
+        from harness.run import bench_plan
+        m = self.cfg.measurement
+        cores, first = m.cores, m.cores.split(",")[0]
+        py_base = {"backend": "python", "file": "baseline/baseline.py", "openmp": False}
+        omp_base = {"backend": "c", "file": "baseline/baseline.c", "openmp": True}
+        #        언어(backend, openmp, threads)        기준선     → openmp_env, kernel_cpus, baseline_cpus, row_threads, row_cores
+        table = [
+            (("python", False, m.threads), py_base,  (False, cores, cores, m.threads, cores)),
+            (("python", False, m.threads), omp_base, (True,  cores, None,  m.threads, cores)),
+            (("c",      False, 1),         py_base,  (False, first, cores, 1,         first)),
+            (("c",      False, 1),         omp_base, (True,  first, None,  1,         first)),
+            (("c",      True,  m.threads), py_base,  (True,  None,  cores, m.threads, cores)),
+            (("c",      True,  m.threads), omp_base, (True,  None,  None,  m.threads, cores)),
+        ]
+        for (backend, openmp, threads), baseline, want in table:
+            plan = bench_plan(self.cfg, backend=backend, openmp=openmp, threads=threads, baseline=baseline)
+            got = (plan.openmp_env, plan.kernel_cpus, plan.baseline_cpus, plan.row_threads, plan.row_cores)
+            self.assertEqual(got, want, (backend, openmp, threads, baseline["backend"]))
+            self.assertEqual(plan.threads, m.threads, "bench 워커는 언제나 measurement.threads 로 뜬다")
+
+    def test_worker_arguments(self) -> None:
+        from harness.run import bench_plan
+        m = self.cfg.measurement
+        omp_base = {"backend": "c", "file": "baseline/baseline.c", "openmp": True}
+        plan = bench_plan(self.cfg, backend="python", openmp=False, threads=m.threads, baseline=omp_base)
+        self.assertEqual(plan.worker_args(with_baseline=True), ["--kernel-cpus", m.cores, "--baseline-cpus", "none"])
+        self.assertEqual(plan.worker_args(with_baseline=False), ["--kernel-cpus", m.cores])
+        plan = bench_plan(self.cfg, backend="c", openmp=True, threads=m.threads, baseline=omp_base)
+        self.assertEqual(plan.worker_args(with_baseline=True), ["--kernel-cpus", "none", "--baseline-cpus", "none"])
+
+    def test_loop_fsync_flag_follows_config(self) -> None:
+        import dataclasses
+
+        from harness.run import bench_args
+        self.assertNotIn("--no-loop-fsync", bench_args(self.cfg), "기본값은 2026-11-11 이전과 같은 동작(fsync)")
+        off = dataclasses.replace(self.cfg, measurement=dataclasses.replace(self.cfg.measurement, bench_loop_fsync=False))
+        self.assertIn("--no-loop-fsync", bench_args(off))
+
+
 if __name__ == "__main__":
     unittest.main()

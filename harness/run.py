@@ -205,12 +205,46 @@ def blas_string(blas: dict[str, Any] | None) -> str | None:
 
 def bench_args(cfg: Config) -> list[str]:
     m = cfg.measurement
-    return ["--warmup", str(m.warmup), "--repeats", str(m.repeats), "--min-repeats", str(m.min_repeats),
+    args = ["--warmup", str(m.warmup), "--repeats", str(m.repeats), "--min-repeats", str(m.min_repeats),
             "--budget-s", str(m.bench_timeout_s)]
+    if not m.bench_loop_fsync:
+        args.append("--no-loop-fsync")
+    return args
 
 
 def omp_env_of(env: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in env.items() if k.startswith(OMP_ENV_PREFIXES)}
+
+
+@dataclass(frozen=True)
+class BenchPlan:
+    """교차 bench 한 번의 실행 계획: 워커를 띄우는 환경과, 커널·기준선을 호출하는 동안의 주 스레드 CPU 집합."""
+
+    threads: int                 # 워커의 스레드 변수(OMP/OPENBLAS/MKL_NUM_THREADS) = measurement.threads
+    openmp_env: bool             # 워커에 omp_env_extra 를 주는가(커널이나 기준선이 OpenMP 일 때)
+    kernel_cpus: str | None      # 커널 호출 동안의 주 스레드 CPU 목록(None = libgomp 의 고정을 그대로)
+    baseline_cpus: str | None    # 기준선 호출 동안
+    row_threads: int             # 행의 threads: 커널이 호출되는 동안의 스레드 수
+    row_cores: str               # 행의 cores: 커널이 호출되는 동안의 CPU 집합
+
+    def worker_args(self, *, with_baseline: bool) -> list[str]:
+        args = ["--kernel-cpus", self.kernel_cpus or "none"]
+        if with_baseline:
+            args += ["--baseline-cpus", self.baseline_cpus or "none"]
+        return args
+
+
+def bench_plan(cfg: Config, *, backend: str, openmp: bool, threads: int, baseline: dict[str, Any]) -> BenchPlan:
+    """언어(backend·openmp·threads)와 과제 기준선(signatures.yaml ``baseline``)에서 bench 실행 계획을 정한다(순수 함수).
+
+    교차 측정이라 워커는 언어와 무관하게 고정 코어 전체·``measurement.threads`` 로 뜬다. 호출 동안의 친화도는
+    ``protocol.call_cpus`` 의 규칙을 따른다(OpenMP: libgomp 고정, python: 고정 코어 전체, 순차 C: 첫 CPU)."""
+    m = cfg.measurement
+    b_openmp = baseline["backend"] == "c" and bool(baseline.get("openmp"))
+    kernel_cpus = protocol.call_cpus(cfg, backend=backend, openmp=openmp, threads=threads)
+    baseline_cpus = protocol.call_cpus(cfg, backend=str(baseline["backend"]), openmp=b_openmp, threads=m.threads)
+    return BenchPlan(threads=m.threads, openmp_env=openmp or b_openmp, kernel_cpus=kernel_cpus, baseline_cpus=baseline_cpus,
+                     row_threads=int(threads), row_cores=kernel_cpus or protocol.bench_cpus(cfg))
 
 
 def warn(msg: str) -> None:
@@ -719,8 +753,9 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
     # 7-b. 교차 측정(2026-11-09): 커널과 기준선을 같은 워커에서 번갈아 호출한다. 그래서 bench 는 언어와 무관하게
     #      measurement.cores(4코어)·measurement.threads 로 띄운다(c_seq 커널은 런타임이 없어 스레드 수에 영향받지 않고,
     #      pthread 사용은 contract_violation 으로 따로 기록된다). check 단계의 언어별 고정은 그대로다.
-    bench_threads = m.threads
-    bench_openmp = openmp or (tctx.spec.baseline["backend"] == "c" and bool(tctx.spec.baseline.get("openmp")))
+    #      호출 동안의 주 스레드 친화도(2026-11-11)는 bench_plan → protocol.call_cpus 가 정한다: 한 프로세스에 OpenMP 코드가
+    #      함께 로드되면 libgomp 가 주 스레드를 CPU 하나에 묶으므로, OpenMP 가 아닌 코드를 부르는 동안에는 그 언어의 규약 집합을 적용한다.
+    plan = bench_plan(cfg, backend=lang.backend, openmp=openmp, threads=lang.threads, baseline=tctx.spec.baseline)
     try:
         b_artifact = baseline_artifact(ctx, tctx, ensure_dir(baseline_dir(cfg.paths.built_dir, ctx.run_id, tctx.task)))
     except (BaselineError, FileNotFoundError) as e:
@@ -729,7 +764,8 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
     extra = bench_args(cfg)
     if b_artifact is not None:
         extra += ["--baseline-backend", str(tctx.spec.baseline["backend"]), "--baseline-artifact", str(b_artifact)]
-    oc = run_worker(cfg, stage="bench", threads=bench_threads, openmp=bench_openmp, backend=lang.backend, artifact=br.artifact,
+    extra += plan.worker_args(with_baseline=b_artifact is not None)
+    oc = run_worker(cfg, stage="bench", threads=plan.threads, openmp=plan.openmp_env, backend=lang.backend, artifact=br.artifact,
                     mode="bench", tests=[tctx.test_path(m.performance_test)], tolerance=tctx.tolerance_path, signatures=tctx.spec.path,
                     out_path=sample_dir / "bench.json", cwd=sample_dir, timeout_s=m.bench_timeout_s,
                     args_mode=row.args or "positional", extra=extra)
@@ -738,8 +774,15 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
         add_violation(row, "stdout_output")
     if oc.doc and oc.doc.get("blas"):
         row.numpy_blas = blas_string(oc.doc.get("blas"))
-    row.threads = bench_threads
-    row.cores = m.cores
+    # 행의 threads·cores 는 커널이 호출되는 동안의 환경이다(c_seq: 1·첫 고정 CPU, numpy·c_openmp: measurement.threads·고정 코어).
+    # omp_env 는 bench 워커가 실제로 받은 변수다(교차 측정이라 기준선과 함께 쓴다; check 단계의 값과 다를 수 있다).
+    row.threads = plan.row_threads
+    row.cores = plan.row_cores
+    row.omp_env = omp_env_of(protocol.launch_env(cfg, plan.threads, openmp=plan.openmp_env))
+    if oc.doc and (oc.doc.get("call_affinity") or {}).get("error"):
+        add_flag(row, "call_affinity_failed")
+    if oc.doc and isinstance(oc.doc.get("call_affinity"), dict):
+        stages["call_affinity"] = oc.doc["call_affinity"]
     bdoc_i = (oc.doc or {}).get("baseline_interleaved")
     if bdoc_i and bdoc_i.get("classification") == "pass" and bdoc_i.get("median_ms"):
         row.baseline_time_ms = bdoc_i.get("median_ms")

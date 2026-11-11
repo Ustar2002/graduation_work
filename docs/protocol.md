@@ -21,7 +21,7 @@
 ## 2. 코어 고정 (pinning)
 
 - 모든 측정은 **P-core 4개, 코어당 1스레드**: `measurement.cores = "0,2,4,6"` → `taskset -c 0,2,4,6`. SMT 형제(1, 3, 5, 7)와 E-core(8–15)는 쓰지 않는다. 하이브리드 CPU에서 E-core/SMT 형제를 섞으면 OpenMP 정적 스케줄 불균형과 SMT 간섭으로 분산이 커진다(형제 코어 spin 1개로 OpenBLAS 1024³가 14.6 → 19.9 ms, +36% 실측).
-- `threads: 1`인 언어(`c_seq`)는 **단일 P-core** `measurement.single_core = "2"`로 더 좁게 고정한다(`taskset -c 2`; cpu0은 IRQ가 몰려 피한다). 코어를 하나만 주므로 "스레드 사용 금지"가 코드로 강제된다.
+- `threads: 1`인 언어(`c_seq`)는 **단일 P-core** `measurement.single_core = "2"`로 더 좁게 고정한다(`taskset -c 2`; cpu0은 IRQ가 몰려 피한다). 코어를 하나만 주므로 "스레드 사용 금지"가 코드로 강제된다. 이것은 **import·check 단계**의 고정이다. bench 는 교차 측정이라 언어와 무관하게 고정 코어 네 개로 뜨고, `c_seq` 커널은 호출되는 동안 그 첫 CPU 하나에 묶인다(§10.1).
 - `protocol.launch_prefix(cfg, threads)`: `threads == 1`이면 `["taskset", "-c", single_core]`, 아니면 `["taskset", "-c", cores]`. `taskset`이 없으면 `[]`로 실행하고 플래그 `taskset_missing`을 단다(행 `taskset_used=0`).
 - 컴파일(`gcc`)도 같은 접두로 P-core에서 실행해 `-march=native` 해석을 고정한다(`march_resolved` 열).
 - 기준선(`tasks/gemm/baseline/baseline.py`)도 같은 코어 집합·스레드 수·환경변수로 측정한다.
@@ -32,9 +32,9 @@
 
 - 상속하는 변수: `PATH`, `HOME`, `LANG`, `TMPDIR`, `VIRTUAL_ENV`. 고정값: `LC_ALL=C`, `PYTHONHASHSEED=0`, `PYTHONPATH=<저장소 루트>`.
 - 스레드 수: `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS` = 언어의 `threads`(`numpy`·`c_openmp`는 `measurement.threads=4`, `c_seq`는 1). NumPy는 `OPENBLAS_NUM_THREADS`(우선)/`OMP_NUM_THREADS`(폴백)로 제어됨을 실측으로 확인했다.
-- OpenMP 백엔드(`c_openmp`) 워커에만 `measurement.omp_env_extra`를 추가한다: `OMP_PROC_BIND=true`, `OMP_PLACES=cores`, `OMP_DYNAMIC=false`.
+- OpenMP 백엔드(`c_openmp`) 워커에만 `measurement.omp_env_extra`를 추가한다: `OMP_PROC_BIND=true`, `OMP_PLACES=cores`, `OMP_DYNAMIC=false`. bench 워커에는 커널이나 기준선 가운데 하나라도 OpenMP 면 추가한다(교차 측정).
 - 사용자 셸의 `OMP_*`, `GOMP_*`, `OPENBLAS_*`, `MKL_*`, `KMP_*`는 **상속하지 않는다**. 그런 변수가 있었으면 한 번 경고하고 정보용 플래그 `env_overrides_dropped`를 단다.
-- 행에는 `threads`, `cores`, `omp_env`(실제 넘긴 OMP 변수 JSON)가 기록된다.
+- 행에는 `threads`, `cores`, `omp_env`(실제 넘긴 OMP 변수 JSON)가 기록된다. bench 를 실행한 행에서는 셋 다 **bench 에서의 값**이다: `threads`·`cores` 는 커널이 호출되는 동안의 스레드 수와 CPU 집합, `omp_env` 는 bench 워커가 받은 변수(§10.1). bench 를 하지 않은 행은 check 단계의 값이다.
 
 ## 4. 워밍업·반복·중앙값
 
@@ -107,8 +107,25 @@ bench 예산 `budget = measurement.bench_timeout_s = 300 s`, 첫 warmup 호출 �
 기준선은 `tasks/gemm/baseline/baseline.py`(`np.matmul(A, B, out=C)`)를 **LLM 커널과 똑같이** python 백엔드 워커로 측정한 값이다.
 
 1. **run 시작 기준선**: `threads = measurement.threads = 4`로 bench → `baseline_run_time_ms`, `baseline_run_gflops`. `final_check`가 pass가 아니거나 `gflops < baseline_min_gflops = 30`이면 참조 BLAS(netlib)나 격리되지 않은 venv를 의심해 **중단**한다. 이어 1스레드로 1회 → `baseline_time_1t_ms`. 파일: `results/built/<run_id>/gemm/baseline/{bench_run.json, bench_1t.json}`. `--no-baseline`이면 기존 파일을 재사용한다.
-2. **대응 기준선**(paired): 샘플의 bench 직전에 같은 설정으로 기준선을 다시 재서 `baseline_time_ms`(대응값), `baseline_time_cv`, `baseline_samples_ms`에 적는다(파일 `baseline/paired_sample_<lang>_<i>.json`). `baseline_drift_pct = (대응 − run 시작) / run 시작 · 100`이고, 절댓값이 `baseline_drift_pct_max = 10`을 넘으면 플래그 `baseline_drift=<x>%`.
+2. **대응 기준선**(paired): 샘플의 bench 직전에 같은 설정으로 기준선을 다시 재서 `baseline_time_ms`(대응값), `baseline_time_cv`, `baseline_samples_ms`에 적는다(파일 `baseline/paired_sample_<lang>_<i>.json`). `baseline_drift_pct = (대응 − run 시작) / run 시작 · 100`이고, 절댓값이 `baseline_drift_pct_max = 10`을 넘으면 플래그 `baseline_drift=<x>%`. **(2026-11-09 이후 대체: 대응 기준선은 별도 실행이 아니라 샘플의 bench 워커 안에서 커널과 번갈아 잰다 — §10.1.)**
 3. 속도비: `speedup_vs_baseline = baseline_time_ms / time_median_ms`(**대응 기준선 사용**), `speedup_vs_baseline_1t = baseline_time_1t_ms / time_median_ms`. 집계의 `speedup_*`는 pass 행의 이 값들이다.
+
+### 10.1 교차 측정과 호출 친화도 (2026-11-09, 2026-11-11)
+
+- **교차 측정**: 샘플의 bench 워커가 커널과 과제의 기준선을 함께 로드해 번갈아 호출한다(`--baseline-backend`, `--baseline-artifact`). 호출 쌍마다 순서를 바꾸고(짝수 쌍은 기준선 먼저) warmup·timed 모두 쌍으로 진행한다. `baseline_time_ms`·`speedup_vs_baseline` 은 이 교차 기준선에서 온다(`bench.json` 의 `interleaved: true`, `baseline_interleaved{…}`). 노트북에서 지속 부하 뒤 클럭이 절반으로 떨어져, 같은 시점에 잰 두 시간의 비율만 안정적이기 때문이다. `baseline_drift_pct` 는 그 run 의 과제별 교차 기준선 중앙값 대비다.
+- **워커 환경**: bench 워커는 언어와 무관하게 `taskset -c <cores>` 와 `measurement.threads` 로 뜬다. 커널이나 기준선이 OpenMP 면 `omp_env_extra` 를 준다. OpenBLAS 스레드 풀은 커널 로드 전에 만들고(`prewarm_blas_threads`), `OPENBLAS_THREAD_TIMEOUT=16` 으로 BLAS 스레드의 스핀 대기를 줄인다.
+- **호출 친화도**(`protocol.call_cpus`, `run.bench_plan`, 워커 `--kernel-cpus`/`--baseline-cpus`): 한 프로세스에 OpenMP 공유 객체가 로드되면 libgomp 가 주 스레드를 place 0(CPU 하나)에 묶는다. 그래서 워커는 코드를 호출하기 직전에 주 스레드의 친화도를 그 코드의 규약 집합으로 두고 직후에 되돌린다(시간 측정 구간 밖).
+
+  | 호출되는 코드 | 호출 동안 주 스레드의 CPU | 비고 |
+  |---|---|---|
+  | OpenMP C (`c_openmp` 커널, C+OpenMP 기준선) | 건드리지 않음 | libgomp 의 고정: 주 스레드 = place 0, 작업 스레드는 나머지 place |
+  | python (`numpy` 커널, NumPy 기준선) | 고정 코어 전체 | 커널이 만드는 스레드가 전체 마스크를 물려받는다 |
+  | 순차 C (`c_seq` 커널) | 고정 코어의 첫 CPU | 프롬프트의 "코어 1개"와 같다. 주 스레드가 이미 있던 CPU 라 옮겨 가지 않는다 |
+
+  결과는 `bench.json` 의 `call_affinity{main_after_load, kernel, baseline, main_after_bench, libgomp, error}` 에 남는다. 요청한 CPU 가 taskset 집합 밖이거나 적용·복원에 실패하면 `error` 에 적고 행에 플래그 `call_affinity_failed` 를 단다.
+- **주파수 샘플**: timed 호출 직후 그 코드가 쓴 CPU(호출 친화도 집합, 없으면 고정 코어 전체)의 주파수를 읽는다.
+- **진행 기록의 fsync**: 호출 쌍 사이에 진행 기록(`in_progress`)을 두 번 쓴다. `measurement.bench_loop_fsync`(기본 true)가 false 면 이 기록을 fsync 없이 쓴다(마지막 기록은 언제나 fsync). false 는 규약 변경 후보이며 아직 적용하지 않았다(decisions.md 2026-11-11).
+- **기록되지 않는 전제**: 이 머신의 libgomp 는 병렬 구간 뒤 스핀 대기를 하지 않는다(하이브리드 CPU 기본값). 스핀하는 런타임에서는 OpenMP 호출 직후의 호출이 느려지므로, 머신을 옮기면 `OMP_DISPLAY_ENV=verbose` 로 `OMP_WAIT_POLICY`·`GOMP_SPINCOUNT` 를 확인한다(decisions.md 2026-11-11 후보 (a)).
 
 ## 11. 주파수·스로틀·온도 샘플링
 

@@ -128,6 +128,9 @@ class MeasurementCfg:
     baseline_drift_pct_max: float
     correctness_tests: list[str]
     performance_test: str
+    # bench 루프 안(호출 쌍 사이)의 진행 기록을 fsync 할지. True 는 2026-11-11 이전과 같은 동작이다(쌍 사이에 fsync 두 번이
+    # 끼어 쌍의 첫 호출만 유휴 뒤에 시작한다). False 는 규약 변경이므로 사용자 승인 뒤에만 쓴다(decisions.md 2026-11-11).
+    bench_loop_fsync: bool = True
 
 
 @dataclass(frozen=True)
@@ -387,6 +390,7 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
             "require_performance_governor", "baseline_min_gflops", "baseline_drift_pct_max", "correctness_tests",
             "performance_test",
         ),
+        optional=("bench_loop_fsync",),
     )
     cores = str(obj["cores"]).strip()
     single_core = str(obj["single_core"]).strip()
@@ -436,6 +440,7 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
         baseline_drift_pct_max=_num(obj, p, "baseline_drift_pct_max", min_value=0.0),
         correctness_tests=_str_list(obj, p, "correctness_tests", nonempty=True),
         performance_test=_str(obj, p, "performance_test"),
+        bench_loop_fsync=_bool(obj, p, "bench_loop_fsync") if "bench_loop_fsync" in obj else True,
     )
 
 

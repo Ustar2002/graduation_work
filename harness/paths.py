@@ -95,8 +95,11 @@ def _default_file_mode() -> int:
     return 0o666 & ~old
 
 
-def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
-    """같은 디렉터리의 임시 파일에 쓴 뒤 ``os.replace`` 로 바꿔치기한다(원자적)."""
+def atomic_write_bytes(path: str | os.PathLike[str], data: bytes, *, fsync: bool = True) -> None:
+    """같은 디렉터리의 임시 파일에 쓴 뒤 ``os.replace`` 로 바꿔치기한다(원자적).
+
+    ``fsync=False`` 면 디스크 동기화를 생략한다: 프로세스가 죽어도 내용은 남지만(페이지 캐시) 전원 장애에는 보장이 없다.
+    측정 루프 안의 진행 기록처럼 동기화 대기(수 ms)가 측정에 끼어들면 안 되는 곳에서만 쓴다."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
@@ -104,7 +107,8 @@ def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
-            os.fsync(fh.fileno())
+            if fsync:
+                os.fsync(fh.fileno())
         os.chmod(tmp_name, _default_file_mode())
         os.replace(tmp_name, target)
     except BaseException:
@@ -115,9 +119,9 @@ def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
         raise
 
 
-def atomic_write_text(path: str | os.PathLike[str], text: str, encoding: str = "utf-8") -> None:
+def atomic_write_text(path: str | os.PathLike[str], text: str, encoding: str = "utf-8", *, fsync: bool = True) -> None:
     """문자열을 원자적으로 쓴다."""
-    atomic_write_bytes(path, text.encode(encoding))
+    atomic_write_bytes(path, text.encode(encoding), fsync=fsync)
 
 
 def json_safe(obj: Any) -> Any:
@@ -131,9 +135,9 @@ def json_safe(obj: Any) -> Any:
     return obj
 
 
-def atomic_write_json(path: str | os.PathLike[str], obj: Any, *, indent: int | None = 2) -> None:
+def atomic_write_json(path: str | os.PathLike[str], obj: Any, *, indent: int | None = 2, fsync: bool = True) -> None:
     """JSON을 원자적으로 쓴다(UTF-8, 키 순서 유지, 끝에 개행). 비유한 실수는 null 로 쓴다(allow_nan=False 로 재발을 막는다)."""
-    atomic_write_text(path, json.dumps(json_safe(obj), ensure_ascii=False, indent=indent, allow_nan=False) + "\n")
+    atomic_write_text(path, json.dumps(json_safe(obj), ensure_ascii=False, indent=indent, allow_nan=False) + "\n", fsync=fsync)
 
 
 def main(argv: list[str] | None = None) -> int:

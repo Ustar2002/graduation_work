@@ -198,6 +198,72 @@ after = sorted(os.sched_getaffinity(0))
 print(json.dumps({"before": before, "after": after}))
 """
 
+# 호출될 때마다 주 스레드와 새로 만든 스레드의 친화도를 cwd 의 affinity_log.jsonl 에 적는 정답 커널
+# (test_bench_python_kernel_keeps_full_mask_with_openmp_baseline: 교차 측정에서 파이썬 커널의 스레드가 libgomp 의 1-CPU 고정을
+#  물려받지 않는지 확인한다).
+PY_AFFINITY_LOG = """
+import json, os, threading
+import numpy as np
+
+def gemm(A, B, C, M, N, K):
+    seen = {"main": sorted(os.sched_getaffinity(0)), "thread": None}
+    def probe():
+        seen["thread"] = sorted(os.sched_getaffinity(threading.get_native_id()))
+    t = threading.Thread(target=probe)
+    t.start()
+    t.join()
+    with open("affinity_log.jsonl", "a") as fh:
+        fh.write(json.dumps(seen) + "\\n")
+    np.matmul(A, B, out=C)
+"""
+
+# 두 번째 호출부터 예외를 던지는 커널(호출 친화도가 예외 경로에서도 복원되는지 본다)
+PY_RAISE_ON_SECOND = """
+import numpy as np
+_n = [0]
+
+def gemm(A, B, C, M, N, K):
+    _n[0] += 1
+    if _n[0] >= 2:
+        raise RuntimeError("boom")
+    np.matmul(A, B, out=C)
+"""
+
+# 호출될 때마다 OpenMP 스레드별 (스레드 번호:CPU:마스크의 CPU 수)를 cwd 의 omp_placement.log 에 한 줄로 적는 정답 커널
+C_OPENMP_PLACEMENT = """
+#define _GNU_SOURCE
+#include <sched.h>
+#include <stdio.h>
+#include <omp.h>
+void gemm(const float* restrict A, const float* restrict B, float* restrict C, int M, int N, int K) {
+    int cpus[64], counts[64], nt = 0;
+    #pragma omp parallel
+    {
+        int t = omp_get_thread_num();
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        sched_getaffinity(0, sizeof(set), &set);
+        if (t < 64) { cpus[t] = sched_getcpu(); counts[t] = CPU_COUNT(&set); }
+        #pragma omp single
+        nt = omp_get_num_threads();
+    }
+    FILE* fh = fopen("omp_placement.log", "a");
+    if (fh) {
+        for (int t = 0; t < nt && t < 64; t++) fprintf(fh, "%d:%d:%d ", t, cpus[t], counts[t]);
+        fprintf(fh, "\\n");
+        fclose(fh);
+    }
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) C[i * N + j] = 0.0f;
+        for (int k = 0; k < K; k++) {
+            float a = A[i * K + k];
+            for (int j = 0; j < N; j++) C[i * N + j] += a * B[k * N + j];
+        }
+    }
+}
+"""
+
 SYS_CPU = Path("/sys/devices/system/cpu")
 
 
@@ -471,6 +537,132 @@ class CKernelTest(WorkerTestBase):
         self.assertEqual(doc["classification"], "pass")
         self.assertEqual(doc["pinned_cpus"], cpus, f"커널 로드 전의 taskset 집합이어야 한다(로드 뒤는 {aff['after']})")
         self.assertEqual(len(doc["cpu_mhz_samples"]), 0 if doc["cpu_mhz_median"] is None else 2 * len(cpus))
+
+    def _bench_python_with_openmp_baseline(self, kernel_cpus: str, *, kernel_code: str = PY_AFFINITY_LOG,
+                                           baseline_code: str = C_OPENMP, extra: list[str] | None = None,
+                                           expect: str = "pass") -> tuple[list[int], list[int], dict, list[dict]]:
+        """파이썬 커널 + OpenMP 기준선의 교차 bench 를 CPU 두 개(서로 다른 코어)에 고정해 돌린다.
+        → (taskset 집합, 로드 뒤 좁아진 집합, bench 문서, 커널이 호출마다 적은 친화도 기록). 작업 디렉터리는 ``self._last_kd``."""
+        if shutil.which("taskset") is None:
+            self.skipTest("taskset 필요")
+        import os
+
+        cpus = _one_cpu_per_core(sorted(os.sched_getaffinity(0)))[:2]
+        if len(cpus) < 2:
+            self.skipTest("서로 다른 물리 코어의 CPU 2개 필요")
+        d = self.workdir()
+        res = build_c(baseline_code, d, BCFG, openmp=True, launch_prefix=[])
+        self.assertTrue(res.ok, f"빌드 실패: {res.error_kind} {res.error_detail}\n{res.log}")
+        assert res.artifact is not None
+        env = dict(launch_env_minimal())
+        env.update({"OMP_NUM_THREADS": "2", "OMP_PROC_BIND": "true", "OMP_PLACES": "cores", "OMP_DYNAMIC": "false"})
+        taskset = ["taskset", "-c", ",".join(str(c) for c in cpus)]
+        probe = d / "affinity_probe.py"
+        probe.write_text(AFFINITY_PROBE, encoding="utf-8")
+        pre = run_isolated(taskset + [str(PYTHON_EXE), "-I", str(probe), str(res.artifact)], timeout_s=60.0, cwd=d, env=env)
+        self.assertEqual(pre.rc, 0, pre.stderr_tail)
+        aff = json.loads(pre.stdout_tail.strip().splitlines()[-1])
+        if aff["after"] == aff["before"]:
+            self.skipTest(f"OpenMP 기준선 로드 뒤 친화도가 좁아지지 않아({aff}) 회귀를 관측할 수 없다")
+
+        kd = self.workdir()
+        self._last_kd = kd
+        kernel = kd / "kernel.py"
+        kernel.write_text(kernel_code, encoding="utf-8")
+        out = kd / "bench.json"
+        cmd = taskset + [str(PYTHON_EXE), "-m", "harness.worker",
+                         "--backend", "python", "--artifact", str(kernel), "--mode", "bench", "--tests", str(self.large),
+                         "--tolerance", str(self.tolerance), "--out", str(out),
+                         "--baseline-backend", "c", "--baseline-artifact", str(res.artifact),
+                         "--kernel-cpus", kernel_cpus, "--baseline-cpus", "none",
+                         "--warmup", "1", "--repeats", "2", "--min-repeats", "1", "--budget-s", "60"] + list(extra or [])
+        proc = run_isolated(cmd, timeout_s=120.0, cwd=kd, env=env)
+        self.assertEqual(proc.rc, 0, proc.stderr_tail)
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        self.assertTrue(doc["complete"])
+        self.assertEqual(doc["classification"], expect)
+        log_path = kd / "affinity_log.jsonl"
+        log = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()] if log_path.exists() else []
+        if expect == "pass":
+            self.assertEqual(doc["baseline_interleaved"]["classification"], "pass")
+            if kernel_code is PY_AFFINITY_LOG:
+                self.assertEqual(len(log), 3, "warmup 1 + timed 2")
+        return cpus, aff["after"], doc, log
+
+    def test_bench_python_kernel_keeps_full_mask_with_openmp_baseline(self) -> None:
+        """교차 측정 회귀(2026-11-11): OpenMP 기준선이 같은 프로세스에 로드되면 libgomp 가 주 스레드를 CPU 하나에 묶는다.
+        파이썬 커널을 부르는 동안에는 고정 코어 전체로 되돌려야 커널이 만든 스레드가 1-CPU 마스크를 물려받지 않는다."""
+        cpus, narrowed, doc, log = self._bench_python_with_openmp_baseline("auto")
+        self.assertEqual(doc["call_affinity"]["main_after_load"], narrowed, "기준선 로드 뒤 주 스레드는 좁아져 있어야 한다")
+        self.assertEqual(doc["call_affinity"]["kernel"], cpus)
+        self.assertIsNone(doc["call_affinity"]["baseline"])
+        self.assertIsNone(doc["call_affinity"]["error"])
+        for entry in log:
+            self.assertEqual(entry["main"], cpus, "커널 호출 동안 주 스레드는 고정 코어 전체")
+            self.assertEqual(entry["thread"], cpus, "커널이 만든 스레드도 고정 코어 전체를 물려받아야 한다")
+
+    def test_bench_kernel_cpus_explicit_list_and_none(self) -> None:
+        """--kernel-cpus 에 CPU 하나를 주면(c_seq 의 단일 코어 규약) 호출 동안 그 CPU 에만 있고, 'none' 이면 건드리지 않는다
+        (libgomp 가 좁힌 집합 그대로 — 이 수정 전의 동작)."""
+        cpus, narrowed, doc, log = self._bench_python_with_openmp_baseline("none")
+        self.assertIsNone(doc["call_affinity"]["kernel"])
+        for entry in log:
+            self.assertEqual(entry["main"], narrowed)
+            self.assertEqual(entry["thread"], narrowed)
+        cpus, narrowed, doc, log = self._bench_python_with_openmp_baseline(str(cpus[1]))
+        self.assertEqual(doc["call_affinity"]["kernel"], [cpus[1]])
+        for entry in log:
+            self.assertEqual(entry["main"], [cpus[1]])
+            self.assertEqual(entry["thread"], [cpus[1]])
+
+    def test_openmp_baseline_keeps_its_placement_while_main_affinity_toggles(self) -> None:
+        """파이썬 커널을 부를 때마다 주 스레드 친화도를 넓혔다가 되돌려도, OpenMP 기준선의 스레드는 호출마다 서로 다른 CPU 에
+        하나씩 묶여 있고 주 스레드(스레드 0)는 place 0 에 있어야 한다(libgomp 는 주 스레드를 다시 묶지 않으므로 복원이 필요하다)."""
+        cpus, narrowed, doc, _ = self._bench_python_with_openmp_baseline("auto", baseline_code=C_OPENMP_PLACEMENT)
+        ca = doc["call_affinity"]
+        self.assertEqual(ca["main_after_load"], narrowed)
+        self.assertEqual(ca["main_after_bench"], narrowed, "bench 뒤 주 스레드는 libgomp 가 정한 고정으로 돌아와 있어야 한다")
+        self.assertIsNone(ca["error"])
+        self.assertIsNotNone(ca["libgomp"], "OpenMP 기준선을 로드했으므로 libgomp 경로가 기록된다")
+        lines = (self._last_kd / "omp_placement.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 3, "기준선 호출: warmup 1 + timed 2")
+        for line in lines:
+            entries = [tuple(int(x) for x in e.split(":")) for e in line.split()]
+            self.assertEqual(len(entries), 2, "OMP_NUM_THREADS=2")
+            self.assertEqual(sorted(cpu for _, cpu, _ in entries), cpus, "스레드마다 서로 다른 고정 CPU")
+            self.assertTrue(all(count == 1 for _, _, count in entries), "스레드마다 CPU 하나에 묶여 있다")
+            self.assertEqual(entries[0][:2], (0, narrowed[0]), "주 스레드는 place 0")
+
+    def test_affinity_is_restored_when_the_kernel_raises(self) -> None:
+        cpus, narrowed, doc, _ = self._bench_python_with_openmp_baseline("auto", kernel_code=PY_RAISE_ON_SECOND, expect="runtime_crash")
+        ca = doc["call_affinity"]
+        self.assertEqual(ca["kernel"], cpus)
+        self.assertEqual(ca["main_after_bench"], narrowed, "예외가 나도 주 스레드 친화도는 복원된다")
+        self.assertIsNone(ca["error"])
+
+    def test_call_cpus_outside_the_pinned_set_are_refused(self) -> None:
+        """요청한 CPU 가 taskset 집합 밖이면 적용하지 않고(주 스레드는 그대로) 오류로 남긴다 → run.py 가 call_affinity_failed 플래그를 단다."""
+        import os
+
+        pinned = _one_cpu_per_core(sorted(os.sched_getaffinity(0)))[:2]
+        outside = [c for c in sorted(os.sched_getaffinity(0)) if c not in pinned]
+        if len(pinned) < 2 or not outside:
+            self.skipTest("고정 집합 밖의 CPU 가 필요")
+        cpus, narrowed, doc, log = self._bench_python_with_openmp_baseline(str(outside[0]))
+        ca = doc["call_affinity"]
+        self.assertIsNone(ca["kernel"])
+        self.assertIn("밖", ca["error"] or "")
+        for entry in log:
+            self.assertEqual(entry["main"], narrowed, "거부된 요청은 친화도를 바꾸지 않는다")
+
+    def test_no_loop_fsync_option(self) -> None:
+        """--no-loop-fsync: 호출 쌍 사이의 진행 기록을 동기화 없이 쓴다. 결과 문서와 판정은 같아야 한다."""
+        _, _, doc, _ = self._bench_python_with_openmp_baseline("auto", extra=["--no-loop-fsync"])
+        self.assertIs(doc["loop_fsync"], False)
+        self.assertIsNone(doc["in_progress"])
+        self.assertEqual(len(doc["timed_ms"]), 2)
+        _, _, doc, _ = self._bench_python_with_openmp_baseline("auto")
+        self.assertIs(doc["loop_fsync"], True, "기본값은 fsync")
 
 
 class PythonKernelTest(WorkerTestBase):
