@@ -1247,6 +1247,15 @@
    "spmv_csr"
   ],
   "omp_min": "0.87",
+  "omp_seq": [
+   "1.4",
+   "3.2"
+  ],
+  "omp_seq_overlap": [
+   "cholesky",
+   "floyd_warshall",
+   "bfs"
+  ],
   "n_tests": "276",
   "nbody_fail_ratio": [
    "1.1",

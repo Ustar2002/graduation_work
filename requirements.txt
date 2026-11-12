@@ -7,3 +7,8 @@ pyyaml>=6.0,<7
 pandas>=3.0,<4
 anthropic>=2.4,<3      # SDK 2.x: messages.create 에 temperature 키워드 없음(extra_body 경유), httpx2 기반
 openai>=3.0,<4         # OpenAI 호환 엔드포인트(오픈 모델) 폴백 전용
+# M3 언어 조건(2026-11-12). numpy 를 2.3.5 로 고정한 채 설치했다(numba 는 numpy<2.6 요구).
+numba==0.68.1          # llvmlite 0.50.0
+halide==22.1.0         # 공식 Python 바인딩(halide-bin, halide-runtime); 오토스케줄러 플러그인 포함 여부는 docs/decisions.md
+mojo==1.2.0            # Mojo 컴파일러(mojo-compiler); CLI 는 .venv/bin/mojo
+# Rust 는 pip 가 아니라 rustup 으로 설치한다(stable 1.99.1, ~/.cargo/bin; PATH 는 바꾸지 않음) — docs/decisions.md 2026-11-12

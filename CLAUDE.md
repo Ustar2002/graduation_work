@@ -12,7 +12,7 @@
 핵심 가설. LLM 코드의 성능 격차는 추상화 수준이 아니라 "성능 결정(루프 순서·타일링·벡터화·병렬화·메모리 배치)을 LLM이 직접 내려야 하는가, 컴파일러·라이브러리에 넘길 수 있는가"로 설명된다.
 독립 변수.
 
-* 언어/조건 (성능 결정 부담 순): `numpy` → `numba`(타입 전부 명시, @njit) → `halide_auto`(알고리즘만, 오토스케줄러) → `halide_manual`(알고리즘+LLM 스케줄) → `c_openmp` → `c_seq`(-O3) → `rust`(+rayon, 후순위) → `opencl`/`c_neon`(후순위) → 확장 `llvm_ir`, `aarch64_asm`.
+* 언어/조건 (성능 결정 부담 순): `numpy` → `numba`(타입 전부 명시, @njit) → `halide_auto`(알고리즘만, 오토스케줄러) → `halide_manual`(알고리즘+LLM 스케줄) → `mojo`(SIMD·병렬 기본 요소 내장, 2026-11-12 추가) → `rust`(+rayon) → `c_openmp` → `c_seq`(-O3) → `opencl`/`c_neon`(후순위) → 확장 `llvm_ir`, `aarch64_asm`.
 * 마이크로 조건 (같은 하네스에 플래그로): `args=positional|keyword`, `grammar_hint=on|off`(저자원 언어용 문법 안내 프롬프트), `feedback=compiler|compiler+lint`(수정 루프에 린트 메시지 포함 여부).
 
 종속 변수 (결과 행의 열).
@@ -24,7 +24,7 @@
 * 성능 결정 요약: `perf_summary`(JSON 문자열, 아래 §5).
 
 오류 분류표 (실험 전에 고정, 변경 금지). `compile_error` · `runtime_crash` · `timeout` · `wrong_output` · `numeric_instability`(NaN/Inf 또는 허용오차 초과이면서 패턴이 수치적) · `arg_order`(인자 순서·차원 뒤바뀜으로 판정되는 wrong_output: 전치/차원 교환 시 일치) · `memory_error`(ASan 탐지) · `race_condition`(반복 실행 간 결과 불일치 또는 TSan 탐지) · `signature_mismatch`(요구한 함수 시그니처를 지키지 않음).
-측정 규약. 입력은 메모리 상주(파일 I/O 없음) · `OMP_NUM_THREADS`와 `taskset` 코어 집합 고정(설정 파일) · CPU 거버너 `performance` 확인(아니면 경고하고 결과에 플래그) · 워밍업 3회 후 10회 반복의 중앙값 · 컴파일 플래그 통일(`-O3 -march=native` 또는 설정값) · 샘플 분포 전체 기록(최선값만 보고하지 않음) · 실행 전 시스템 부하 체크(load average 기록).
+측정 규약. 입력은 메모리 상주(파일 I/O 없음) · `OMP_NUM_THREADS`와 `taskset` 코어 집합 고정(설정 파일) · CPU 거버너 `performance` 확인(아니면 경고하고 결과에 플래그) · 워밍업 3회 + 10회 반복을 서로 다른 시각의 별도 프로세스에서 3라운드(총 30회) 측정해 평균·95% 신뢰구간·중앙값 보고(2026-11-12 면담 반영; 이전 실험은 10회 중앙값) · 컴파일 플래그 통일(`-O3 -march=native` 또는 설정값) · 샘플 분포 전체 기록(최선값만 보고하지 않음) · 실행 전 시스템 부하 체크(load average 기록).
 모델. 기본 프론티어 API 모델 1종(환경변수로 지정), temperature 고정(기본 0.2), 과제당 `n=5` 샘플, 수정 루프 최대 3턴. 오픈 모델은 2차(OpenAI 호환 엔드포인트로 교체 가능하게).
 2. 저장소 구조
 
@@ -76,11 +76,11 @@ llm-lang-hpc/
 3. 마일스톤 (순서대로, 각 단계 끝에 결과를 보여주고 멈춘다)
 M1 — 수직 슬라이스 (최우선). GEMM 하나, 언어 `numpy`·`c_seq`·`c_openmp`, 모델 1개, `n=3`. 생성→추출→빌드→실행→정확성→시간→CSV까지. 결과 `results/runs.csv`에 행이 쌓이고 `analysis/aggregate.py`가 pass율·중앙값 속도비를 출력하면 완료. 이 단계에서 측정 규약(`protocol.py`)과 오류 분류를 함께 완성한다.
 M2 — 과제 확장(2026-11-05 갱신). 커널 12개를 3단계로 넣는다(§4 표). M2a = Tier 1(`gemm`, `jacobi2d`, `spmv_csr`, `dot`), M2b = Tier 2, M2c = Tier 3. 각 과제에 참조·테스트·기준선·허용오차. `n=5`. 앞 단계 결과를 보고 다음 단계를 넣는다(원칙 1).
-M3 — 언어 확장. `numba`(타입 명시 강제: 프롬프트에 서명 타입 요구, 빌드 단계에서 `@njit` 시그니처 검사), `halide_auto`/`halide_manual`(pip `halide`; 오토스케줄러 플러그인 로드 확인; 실패 시 `docs/decisions.md`에 기록하고 CPU 타깃만). `rust`는 툴체인 확인 후.
+M3 — 언어 확장. `numba`(타입 명시 강제: 프롬프트에 서명 타입 요구, 빌드 단계에서 `@njit` 시그니처 검사), `halide_auto`/`halide_manual`(pip `halide`; 오토스케줄러 플러그인 로드 확인; 실패 시 `docs/decisions.md`에 기록하고 CPU 타깃만). `rust`는 툴체인 확인 후. **2026-11-12(11/11 면담 반영)**: 대상은 `numba`, `halide_auto`, `halide_manual`, `rust`(+rayon), `mojo`로 확정. 측정은 리눅스 데스크톱으로 옮기고(위 측정 규약), 모든 언어의 코드를 최종 장비에서 다시 생성한다(노트북 결과는 1차 실험으로 보존하고 같은 코드를 새 장비에서도 재측정). 경위는 `docs/decisions.md`.
 M4 — 마이크로 조건. `args=keyword`(Python/Numba 키워드 전용 시그니처, C는 매개변수 구조체), `grammar_hint`, `feedback=compiler+lint`(§6 플러그인 연결), 수정 루프.
 M5 — 성능 결정 요약 + 안전성. `perf_summary.py`, `safety.py`(ASan/UBSan), 린트 플러그인 호출. 결과 열 채움.
 M6 — 분석·그래프·대시보드. 산점도(x: 언어를 성능 결정 부담 순으로, y: pass@1과 속도비), 오류 분류 막대, 조건별 효과(대응 비교 + 부트스트랩 CI). 대시보드는 마지막.
-M7 — 확장(시간 남을 때만). `llvm_ir`/`aarch64_asm` 직접 생성 vs C `-O0`/`-O3`. 보드(RUBIK Pi 3)에서 같은 하네스 재실행.
+M7 — 확장(시간 남을 때만). `llvm_ir`/`aarch64_asm` 직접 생성 vs C `-O0`/`-O3`. 보드(RUBIK Pi 3)에서 같은 하네스 재실행. 후속 연구 후보(11/11 면담): LLM 기반 최적화 패스 순서 결정(phase ordering)이 언어·컴파일러에 따라 어떻게 달라지는지 — 이를 위해 빌드 단계에서 값싸게 얻을 수 있는 LLVM IR 등 중간 산출물은 보존한다.
 4. 과제 명세 (M1·M2)
 공통: float32, 행우선(row-major), 입력 버퍼는 읽기 전용, 출력 버퍼는 호출자가 할당. 크기는 `small`(정확성, 수 ms)·`large`(성능, 수백 ms~수 s) 두 가지. 허용오차는 과제별 `tolerance.yaml`(GEMM: rtol 1e-3 — 누적 순서 차이 허용; 스텐실: 1e-5; SpMV: 1e-4).
 

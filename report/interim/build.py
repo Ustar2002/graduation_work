@@ -296,6 +296,10 @@ def summarize(rows: list[dict[str, str]], code: dict | None, aff: dict | None) -
         "n_drift": str(s["measure"]["n_drift_flag"]), "n_load": str(s["measure"]["n_load_info"]),
         "affected_tasks": affected,
         "omp_min": f"{min(cells[t]['c_openmp']['speedup'] for t, _ in TASKS):.2f}",
+        # 면담(11/11) 지적 "OpenMP 가 순차보다 느렸다": 중앙값 비와, 개별 구현끼리 역전이 있는 과제
+        "omp_seq": _rng([cells[t]["c_openmp"]["speedup"] / cells[t]["c_seq"]["speedup"] for t, _ in TASKS], 1),
+        "omp_seq_overlap": [t for t, _ in TASKS if cells[t]["c_openmp"]["speedups"] and cells[t]["c_seq"]["speedups"]
+                            and min(cells[t]["c_openmp"]["speedups"]) < max(cells[t]["c_seq"]["speedups"])],
         "n_tests": str(_count_unit_tests()),
         "nbody_fail_ratio": _nbody_numpy_fail_ratio(rows),
         "gen_dates": sorted({rid[:8] for rid in RUNS}),
@@ -388,6 +392,8 @@ def check_claims(s: dict) -> None:
     holds("nbody·cholesky·fft 의 C 속도비 > 2",
           all(cells[t][lang]["speedup"] > 2 for t in ("nbody", "cholesky", "fft") for lang in C_LANGS))
     holds("dot numpy 는 기준선보다 빠르다(최솟값 > 1.2)", min(cells["dot"]["numpy"]["speedups"]) > 1.2)
+    holds("c_openmp 속도비 중앙값이 모든 과제에서 c_seq 보다 높다",
+          all(cells[t]["c_openmp"]["speedup"] > cells[t]["c_seq"]["speedup"] for t, _ in TASKS))
     holds("c_openmp 속도비는 모든 과제에서 0.8 이상(직접 결정의 속도 손실 없음)", all(cells[t]["c_openmp"]["speedup"] >= 0.8 for t, _ in TASKS),
           {t: round(cells[t]["c_openmp"]["speedup"], 2) for t, _ in TASKS})
 
