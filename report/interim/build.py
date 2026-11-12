@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import re
 import statistics as st
 import sys
@@ -40,7 +41,12 @@ TASKS: tuple[tuple[str, int], ...] = (
 # 기준선이 NumPy 라이브러리 호출인 과제(나머지의 기준선은 C+OpenMP 참조 구현)
 LIBRARY_BASELINE = ("gemm", "dot", "sort", "cholesky", "fft")
 # 본문 4.3 의 사후 분류: numpy 구현이 연산의 대부분을 최적화된 루틴(BLAS, SIMD 정렬)에 위임한 과제
-PARITY_TASKS = ("gemm", "dot", "sort", "cholesky")
+PARITY_TASKS = ("gemm", "dot", "sort")
+# 같은 과제 안에서 c_openmp/numpy 격차가 중간인 과제(numpy 안에서 모델이 병렬화·블록 분해를 직접 구현)와 큰 과제(사후 분류).
+MID_TASKS = ("jacobi2d", "scan", "cholesky")
+LARGE_TASKS = ("histogram", "bfs", "spmv_csr", "fft", "floyd_warshall")
+# 호출 친화도 수정(2026-11-11)과 3라운드 규약(2026-11-12) 이전의 측정(11-09). 결함의 크기와 측정 세션 간 차이를 보고하는 데 쓴다.
+PREV_CSV = ROOT / "results" / "runs_measured_20261109.csv"
 # 공시 단가(USD / 100만 토큰; Claude Sonnet 5.5, 2026-10 기준). 비용은 추정치다.
 PRICE_IN, PRICE_OUT = 2.0, 10.0
 
@@ -155,14 +161,54 @@ def affinity_status(rows: list[dict[str, str]]) -> dict | None:
 
 # ----------------------------------------------------------------------------- 집계
 
+def speedup_column(rows: list[dict[str, str]]) -> str:
+    """표·그림의 샘플별 속도비 열: 측정된 행이 모두 2026-11-12 규약(라운드 평균)이면 ``speedup_mean``, 아니면 ``speedup_vs_baseline``."""
+    benched = [r for r in rows if r.get("bench_ran") == "1" and r.get("pass") == "1" and r.get("speedup_vs_baseline")]
+    if benched and all(r.get("speedup_mean") for r in benched):
+        return "speedup_mean"
+    return "speedup_vs_baseline"
+
+
+def _previous_measurement(cells: dict[str, dict]) -> dict:
+    """11-09 측정(``PREV_CSV``)과의 비교: (1) 결함이 과대평가했던 c_openmp/numpy 격차, (2) 측정 세션 간 C 조건 속도비 변화.
+    두 측정 모두 ``speedup_vs_baseline``(중앙값 비)로 비교한다(11-09 에는 평균 비가 없다). 파일이 없으면 빈 dict."""
+    if not PREV_CSV.is_file():
+        return {}
+    with PREV_CSV.open(newline="", encoding="utf-8") as fh:
+        prev = [r for r in csv.DictReader(fh) if r["run_id"] in RUNS and r["speedup_vs_baseline"]]
+    with CSV_PATH.open(newline="", encoding="utf-8") as fh:
+        now = [r for r in csv.DictReader(fh) if r["run_id"] in RUNS and r["speedup_vs_baseline"]]
+
+    def med(rows: list[dict[str, str]], task: str, lang: str) -> float | None:
+        v = [float(r["speedup_vs_baseline"]) for r in rows if r["task"] == task and r["language"] == lang]
+        return st.median(v) if v else None
+
+    prev_ratio = {}
+    for t in ("jacobi2d", "scan", "histogram"):
+        a, b = med(prev, t, "c_openmp"), med(prev, t, "numpy")
+        if a and b:
+            prev_ratio[t] = f"{a / b:.1f}"
+    changes = [med(now, t, lang) / med(prev, t, lang) for t in ("cholesky", "fft") for lang in ("c_seq", "c_openmp")
+               if med(now, t, lang) and med(prev, t, lang)]
+    # 비교 기준: 결함(스레드를 쓰는 numpy × C+OpenMP 기준선)과 cholesky·fft 를 뺀 나머지 칸의 변화
+    defect_tasks = ("jacobi2d", "scan", "histogram", "spmv_csr", "floyd_warshall")
+    others = [abs(med(now, t, lang) / med(prev, t, lang) - 1) for t, _ in TASKS for lang in LANGS
+              if t not in ("cholesky", "fft") and not (lang == "numpy" and t in defect_tasks)
+              and med(now, t, lang) and med(prev, t, lang)]
+    return {"prev_ratio": prev_ratio,
+            "session_cf": _rng(changes, 1) if changes else None,
+            "session_others_pct": f"{100 * st.median(others):.0f}" if others else None}
+
+
 def summarize(rows: list[dict[str, str]], code: dict | None, aff: dict | None) -> dict:
     by_key = {(r["task"], r["language"], int(r["sample_idx"])): r for r in rows}
+    col = speedup_column(rows)
     cells: dict[str, dict[str, dict]] = {}
     for task, _tier in TASKS:
         cells[task] = {}
         for lang in LANGS:
             rs = [r for r in rows if r["task"] == task and r["language"] == lang]
-            sp = sorted(v for v in (_f(r["speedup_vs_baseline"]) for r in rs) if v is not None)
+            sp = sorted(v for v in (_f(r.get(col, "")) for r in rs) if v is not None)
             cells[task][lang] = {
                 "n": len(rs),
                 "n_pass": sum(r["pass"] == "1" for r in rs),
@@ -213,7 +259,7 @@ def summarize(rows: list[dict[str, str]], code: dict | None, aff: dict | None) -
 
     def sp_of(task: str, lang: str, idx: int) -> float | None:
         r = by_key.get((task, lang, idx))
-        return _f(r["speedup_vs_baseline"]) if r else None
+        return _f(r.get(col, "")) if r else None
 
     s: dict = {
         "runs": list(RUNS),
@@ -234,6 +280,9 @@ def summarize(rows: list[dict[str, str]], code: dict | None, aff: dict | None) -
                     "n_drift_flag": sum("baseline_drift" in r["protocol_flags"] for r in flagged),
                     "n_load_info": sum("load_1m=" in r["protocol_flags"] for r in benched),
                     "created_dates": sorted({r["created_at"][:10] for r in rows}),
+                    "speedup_column": col,
+                    "bench_rounds": sorted({r.get("bench_rounds", "") for r in benched}),
+                    "repeats_total": sorted({r.get("repeats", "") for r in benched}),
                     "harness_versions": sorted({r["harness_version"] for r in rows}),
                     "governors": sorted({r["governor"] for r in rows}),
                     "models": sorted({r["model_served"] for r in rows}),
@@ -273,7 +322,11 @@ def summarize(rows: list[dict[str, str]], code: dict | None, aff: dict | None) -
         "by_type": {k: str(v) for k, v in Counter(r["error_type"] for r in failed).items()},
         "ratio": {t: f"{ratio[t]:.2f}" for t in ratio},
         "parity": _rng([ratio[t] for t in PARITY_TASKS]),
+        "parity_dev": str(math.ceil(100 * max(abs(1 - ratio[t]) for t in PARITY_TASKS))),
+        "mid": _rng([ratio[t] for t in MID_TASKS], 1),
+        "large": _rng([ratio[t] for t in LARGE_TASKS], 1),
         "rest": _rng([ratio[t] for t in rest], 1),
+        **_previous_measurement(cells),
         "n_parity": str(len(PARITY_TASKS)), "n_rest": str(len(rest)),
         "np_lib": _rng([cells[t]["numpy"]["speedup"] for t in LIBRARY_BASELINE]),
         "np_c": _rng([cells[t]["numpy"]["speedup"] for t in non_lib_np]),
@@ -282,6 +335,10 @@ def summarize(rows: list[dict[str, str]], code: dict | None, aff: dict | None) -
         "n_non_lib_np": str(len(non_lib_np)),
         "big": _rng(big),
         "aa": [f"{aa['speedup_min']:.2f}", f"{aa['speedup_max']:.2f}", f"{aa['speedup']:.2f}"],
+        # 해석하지 않을 차이의 크기: A/A 대조의 1 로부터의 최대 편차를 5% 단위로 올림
+        "aa_res": str(max(5, 5 * math.ceil(100 * max(abs(1 - aa["speedup_min"]), abs(aa["speedup_max"] - 1)) / 5))),
+        "metric_is_mean": col == "speedup_mean",
+        "measured_on": sorted({r["created_at"][:10] for r in rows if r.get("bench_ran") == "1"}),
         "chol_blocked": _rng(chol_blocked, 1) if chol_blocked else None,
         "chol_plain": f"{chol_plain[0]:.2f}" if chol_plain else None,
         "chol_np": cells["cholesky"]["numpy"]["speedup_str"],
@@ -377,15 +434,20 @@ def check_claims(s: dict) -> None:
     ratio = {t: cells[t]["ratio"] for t, _ in TASKS if cells[t]["ratio"] is not None}
     rest = [t for t in ratio if t not in PARITY_TASKS]
     expect("c_openmp/numpy 비가 정의된 과제 수(nbody 제외)", len(ratio), 11)
-    holds("대등한 네 과제: c_openmp/numpy 가 1.5배 이내", all(1 / 1.5 <= ratio[t] <= 1.5 for t in PARITY_TASKS),
+    holds("대등한 세 과제: c_openmp/numpy 가 1.25배 이내", all(1 / 1.25 <= ratio[t] <= 1.25 for t in PARITY_TASKS),
           {t: round(ratio[t], 2) for t in PARITY_TASKS})
-    holds("나머지 일곱 과제: c_openmp 가 2.5배 넘게 빠르다", len(rest) == 7 and all(ratio[t] > 2.5 for t in rest),
-          {t: round(ratio[t], 2) for t in rest})
+    holds("중간 과제: c_openmp/numpy 가 1.5~3배", all(1.5 <= ratio[t] <= 3.0 for t in MID_TASKS), {t: round(ratio[t], 2) for t in MID_TASKS})
+    holds("격차가 큰 다섯 과제: c_openmp/numpy 가 4배 이상", all(ratio[t] >= 4.0 for t in LARGE_TASKS), {t: round(ratio[t], 2) for t in LARGE_TASKS})
+    expect("세 그룹이 nbody 를 뺀 11개 과제를 나눈다", sorted(PARITY_TASKS + MID_TASKS + LARGE_TASKS), sorted(ratio))
+    prev = s["c"].get("prev_ratio") or {}
+    holds("결함 전 측정에서 jacobi2d·scan 격차가 지금보다 2배 넘게 컸다",
+          all(t in prev and float(prev[t]) > 2 * ratio[t] for t in ("jacobi2d", "scan")), prev)
     aa = cells["gemm"]["numpy"]
     holds("A/A 대조(gemm numpy = 기준선과 같은 호출): 중앙값이 1 의 ±20% 안", 0.8 <= aa["speedup"] <= 1.2, aa["speedup"])
+    holds("A/A 분해능이 대등 기준(1.25배)보다 작다", int(s["c"]["aa_res"]) <= 25, s["c"]["aa_res"])
     non_lib_np = [t for t, _ in TASKS if t not in LIBRARY_BASELINE and cells[t]["numpy"]["speedup"] is not None]
     expect("C 기준선 과제 중 numpy 가 통과한 과제 수", len(non_lib_np), 6)
-    holds("C 기준선 과제에서 numpy 속도비 < 0.5", all(cells[t]["numpy"]["speedup"] < 0.5 for t in non_lib_np))
+    holds("C 기준선 과제에서 numpy 는 기준선보다 느리다(속도비 < 1)", all(cells[t]["numpy"]["speedup"] < 1 for t in non_lib_np))
     holds("같은 과제에서 c_openmp 속도비 ≥ 0.9", all(cells[t]["c_openmp"]["speedup"] >= 0.9 for t in non_lib_np))
     holds("같은 과제에서 c_seq 속도비 < c_openmp 속도비", all(cells[t]["c_seq"]["speedup"] < cells[t]["c_openmp"]["speedup"] for t in non_lib_np))
     holds("라이브러리 기준선 과제에서 numpy 속도비 ≥ 0.8", all(cells[t]["numpy"]["speedup"] >= 0.8 for t in LIBRARY_BASELINE))
