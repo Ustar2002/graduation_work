@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from harness.paths import DEFAULT_EXPERIMENT_YAML, DEFAULT_MACHINE_YAML, resolve
+from harness.paths import DEFAULT_EXPERIMENT_YAML, DEFAULT_MACHINE_YAML, machine_yaml_for_host, resolve
 
 _LOG = "[config]"
 
@@ -544,8 +544,13 @@ def load_config(path: Path | None = None) -> Config:
 
 
 def load_machine(path: Path | None = None) -> dict[str, Any]:
-    """``config/machine.yaml`` 을 dict로 읽는다. 없으면 ``{}`` 와 함께 stderr 경고."""
-    src = resolve(path) if path is not None else DEFAULT_MACHINE_YAML
+    """머신 프로필을 dict로 읽는다: 이 호스트의 ``config/machines/<hostname>.yaml``, 없으면 이전 위치 ``config/machine.yaml``.
+    둘 다 없으면 ``{}`` 와 함께 stderr 경고."""
+    if path is not None:
+        src = resolve(path)
+    else:
+        host_file = machine_yaml_for_host()
+        src = host_file if host_file.exists() else DEFAULT_MACHINE_YAML
     if not src.exists():
         print(f"{_LOG} 경고: {src} 가 없다. 먼저 `.venv/bin/python -m harness.protocol --probe --write` 를 실행하라.", file=sys.stderr)
         return {}

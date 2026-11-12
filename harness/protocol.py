@@ -30,7 +30,7 @@ from typing import Any
 import yaml
 
 from harness.config import Config, ConfigError, load_config, load_machine, parse_cpulist
-from harness.paths import DEFAULT_MACHINE_YAML, PYTHON_EXE, ROOT, atomic_write_text
+from harness.paths import PYTHON_EXE, ROOT, atomic_write_text, machine_yaml_for_host
 from harness.procutil import run_isolated
 
 _LOG = "[protocol]"
@@ -793,8 +793,9 @@ def probe_machine(cc: str = "gcc") -> dict[str, Any]:
     }
 
 
-def write_machine_yaml(machine: dict[str, Any], path: Path = DEFAULT_MACHINE_YAML) -> Path:
+def write_machine_yaml(machine: dict[str, Any], path: Path | None = None) -> Path:
     """머신 프로브 결과를 YAML로 원자적으로 쓴다."""
+    path = path if path is not None else machine_yaml_for_host(str(machine.get("hostname") or "") or None)
     header = "# harness.protocol --probe --write 가 생성한 파일. 손으로 고치지 말고 다시 프로브하라.\n"
     body = yaml.safe_dump(machine, sort_keys=False, allow_unicode=True, default_flow_style=False, width=120)
     atomic_write_text(path, header + body)
@@ -850,17 +851,47 @@ def environment_fingerprint(cfg: Config, machine: dict[str, Any], static: Static
 # ----------------------------------------------------------------------------- CLI
 
 
+def suggest_cores(machine: dict[str, Any], n: int) -> list[int]:
+    """측정 코어 후보: 성능 코어(P-core; 하이브리드가 아니면 모든 코어) 가운데 **물리 코어마다 CPU 하나**(SMT 형제 중 번호가
+    가장 작은 것)를 골라 앞에서부터 ``n`` 개. machine.yaml(``probe_machine``)의 ``p_core_cpus``·``thread_siblings`` 를 쓴다.
+    새 장비로 옮길 때 ``measurement.cores`` 를 정하는 근거(docs/desktop_setup.md)."""
+    cpus = [int(c) for c in (machine.get("p_core_cpus") or [])]
+    if not cpus:
+        siblings = machine.get("thread_siblings") or {}
+        cpus = sorted(int(c) for c in siblings) if siblings else list(range(int(machine.get("logical_cpus") or 0)))
+    siblings = {int(k): sorted(int(x) for x in v) for k, v in (machine.get("thread_siblings") or {}).items()}
+    seen: set[tuple[int, ...]] = set()
+    picked: list[int] = []
+    for c in sorted(cpus):
+        group = tuple(siblings.get(c, [c]))
+        if group in seen:
+            continue
+        seen.add(group)
+        picked.append(min(group))
+    return picked[: max(0, int(n))]
+
+
 def main(argv: list[str] | None = None) -> int:
-    """``--check`` / ``--probe [--write [PATH]]`` / ``--fingerprint`` / ``--env-identity``."""
+    """``--check`` / ``--probe [--write [PATH]]`` / ``--fingerprint`` / ``--env-identity`` / ``--suggest-cores N``."""
     parser = argparse.ArgumentParser(prog="python -m harness.protocol", description="측정 규약 검사·머신 프로브")
     parser.add_argument("--config", type=Path, default=None, help="experiment.yaml 경로")
     parser.add_argument("--check", action="store_true", help="정적+동적 규약 검사 결과를 JSON으로 출력 (플래그 있으면 exit 1)")
     parser.add_argument("--probe", action="store_true", help="머신 프로브 JSON 출력")
-    parser.add_argument("--write", nargs="?", const=DEFAULT_MACHINE_YAML, default=None, type=Path, metavar="PATH",
-                        help="--probe 결과를 YAML로 저장 (기본 config/machine.yaml)")
+    parser.add_argument("--write", nargs="?", const="", default=None, metavar="PATH",
+                        help="--probe 결과를 YAML로 저장 (기본 config/machines/<hostname>.yaml)")
     parser.add_argument("--fingerprint", action="store_true", help="환경 지문(dict, hash) 출력")
     parser.add_argument("--env-identity", action="store_true", help="(내부용) 현재 인터프리터의 python/numpy/BLAS/SDK 정체 JSON")
+    parser.add_argument("--suggest-cores", type=int, default=None, metavar="N",
+                        help="config/machine.yaml 에서 측정 코어 N 개를 고른다(물리 성능 코어마다 CPU 하나) → measurement.cores 후보")
     ns = parser.parse_args(argv)
+
+    if ns.suggest_cores is not None:
+        picked = suggest_cores(load_machine(), ns.suggest_cores)
+        total = len(suggest_cores(load_machine(), 10_000))
+        print(",".join(str(c) for c in picked))
+        print(f"{_LOG} 물리 성능 코어 {total}개 중 {len(picked)}개 (SMT 형제·효율 코어 제외). "
+              f"measurement.cores 에 넣고 threads 를 {len(picked)} 로 맞춘다.", file=sys.stderr)
+        return 0 if len(picked) == ns.suggest_cores else 1
 
     if ns.env_identity:
         print(json.dumps(env_identity(), ensure_ascii=False))
@@ -886,7 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         machine = probe_machine(cc=cfg.build.cc if cfg is not None else "gcc")
         print(json.dumps(machine, ensure_ascii=False, indent=2))
         if ns.write is not None:
-            out = write_machine_yaml(machine, Path(ns.write))
+            out = write_machine_yaml(machine, Path(ns.write) if ns.write else None)
             print(f"{_LOG} machine.yaml 저장: {out}", file=sys.stderr)
             blas = machine.get("numpy_blas") or {}
             if "openblas" not in str(blas.get("name") or "").lower():

@@ -20,7 +20,15 @@ ROOT: Path = Path(__file__).resolve().parent.parent
 
 CONFIG_DIR: Path = ROOT / "config"
 DEFAULT_EXPERIMENT_YAML: Path = CONFIG_DIR / "experiment.yaml"
-DEFAULT_MACHINE_YAML: Path = CONFIG_DIR / "machine.yaml"
+DEFAULT_MACHINE_YAML: Path = CONFIG_DIR / "machine.yaml"   # 이전 위치(호스트별 파일이 없을 때만 읽는다)
+MACHINES_DIR: Path = CONFIG_DIR / "machines"                # 호스트별 머신 프로필(2026-11-12; 노트북·데스크톱을 한 저장소에)
+
+
+def machine_yaml_for_host(host: str | None = None) -> Path:
+    """이 호스트의 머신 프로필 경로 ``config/machines/<hostname>.yaml``."""
+    import socket
+
+    return MACHINES_DIR / f"{host or socket.gethostname()}.yaml"
 PROMPTS_DIR: Path = ROOT / "prompts"
 TASKS_DIR: Path = ROOT / "tasks"
 RESULTS_DIR: Path = ROOT / "results"

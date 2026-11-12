@@ -9,7 +9,7 @@
 ## 1. 저장소 구조
 
 ```
-config/experiment.yaml      실험 설정(모델·n·언어·과제·빌드 플래그·측정 규약)   config/machine.yaml  머신 프로브 결과(생성됨)
+config/experiment.yaml      실험 설정(모델·n·언어·과제·빌드 플래그·측정 규약)   config/machines/<호스트>.yaml  머신 프로브 결과(생성됨)
 tasks/<task>/               spec.md(프롬프트에 그대로 삽입)·spec.ko.md, signatures.yaml(시그니처·args·work·baseline·param_docs; harness/taskspec.py 가 읽음),
                             gen_tests.py(harness/testgen.py; 시드 고정 npz), tolerance.yaml, baseline/{baseline.py | baseline.c}, tests/(생성됨, git 제외)
                             Tier 1: gemm, jacobi2d, spmv_csr, dot   Tier 2: histogram, scan, nbody, sort   (§1-1)
@@ -40,7 +40,7 @@ analysis/aggregate.py       집계         tests/test_*.py  단위 테스트    
 
 ```sh
 make venv                 # python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  (다른 인터프리터: make venv SYSPY=python3.14)
-make probe                # config/machine.yaml 생성 (CPU 토폴로지·거버너·BLAS 정체·컴파일러)
+make probe                # config/machines/<호스트>.yaml 생성 (CPU 토폴로지·거버너·BLAS 정체·컴파일러)
 make tests                # tasks/*/tests/{tiny,rect,small,large}.npz + manifest.json (8개 과제, 시드 고정, 바이트 동일 재생성; 전체 약 1.3 GB, 약 15 s)
 make unittest             # tests/ 단위 테스트
 ```
@@ -93,7 +93,7 @@ make real RUN_ID=20261105-opus55 STRICT=1   # run --strict-protocol: run 시작�
 | `results/built/<run_id>/gemm/baseline/` | `bench_run.json`(run 시작 기준선), `bench_1t.json`(1스레드), `paired_sample_<lang>_<i>.json`(샘플별 대응 기준선) |
 | `results/runs.csv` | 실제 제공자 행(git에 올리는 유일한 결과) |
 | `results/runs_dummy.csv` | `provider=dummy` 행 |
-| `config/machine.yaml` | 머신 프로브 결과 |
+| `config/machines/<호스트>.yaml` | 머신 프로브 결과(호스트별; 없으면 이전 위치 `config/machine.yaml`) |
 
 `result.json`이 진실의 원천이다. CSV 헤더가 스키마와 달라지면 `.venv/bin/python -m harness.run --rebuild-csv`로 다시 만든다. 같은 행 키 `(run_id, task, language, args, grammar_hint, feedback, sample_idx, turn)`는 교체(upsert)된다.
 
@@ -149,7 +149,7 @@ pandas로 읽어(`dtype=str, keep_default_na=False` 뒤 수동 변환) 행 키 �
 ## 8. 확정된 실험 조건 (2026-11-05 사용자 확인; 근거는 `docs/decisions.md`)
 
 1. **LLM** — 제공자 `anthropic`, 키 변수 `ANTHROPIC_API_KEY`, 모델 `claude-sonnet-5-5`, `effort=medium`, `thinking=adaptive`. Claude 4.7+/5.x는 `temperature`/`top_p`/`top_k`를 거부하고 `seed`가 없어 **제공자 기본 샘플링**을 쓴다(CLAUDE.md의 "temperature 0.2" 이탈). 비용은 Max 구독의 월 API 크레딧(Console 조직 연결 필요)으로 충당한다. 모델은 전체 실험 동안 바꾸지 않는다.
-2. **머신** — `config/machine.yaml`(i7-1260P, P-core 4개 고정). 거버너는 측정 세션마다 `sudo cpupower frequency-set -g performance`(재부팅하면 되돌아감). 실험 서버가 정해지면 `make probe`와 `measurement.cores`를 다시 맞춘다.
+2. **머신** — `config/machines/<호스트>.yaml`(노트북: i7-1260P, P-core 4개 고정). 거버너는 측정 세션마다 `sudo cpupower frequency-set -g performance`(재부팅하면 되돌아감). 실험 서버가 정해지면 `make probe`와 `measurement.cores`를 다시 맞춘다.
 3. **M1 언어** — `numpy`, `c_seq`, `c_openmp`.
 4. **저장소** — `https://github.com/Ustar2002/graduation_work` (비공개). `harness_version`은 `git describe`.
 5. **프롬프트의 하드웨어 사실 공개** — 승인. 모든 언어에 같은 사실을 준다.

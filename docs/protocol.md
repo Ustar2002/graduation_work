@@ -87,7 +87,7 @@ bench 예산 `budget = measurement.bench_timeout_s = 300 s`, 첫 warmup 호출 �
 | BLAS 정체 | `.venv` 파이썬 서브프로세스에서 NumPy BLAS 이름에 `openblas` 포함 | `blas=<reference\|unknown\|이름>` — `run.py`는 이 경우 **항상 중단**(--strict 무관) | `numpy_blas` |
 | 환경변수 | 검사 아님(정보) | `env_overrides_dropped` — 사용자 셸의 OMP_*/OPENBLAS_* 등을 버렸음. **정보용** | — |
 
-`ok = 정보용(turbo=, env_overrides_dropped) 외 플래그 없음`. `machine.yaml`의 `hostname`이 현재와 다르면 경고(재프로브 안내). `run.py`는 플래그가 있어도 경고 후 계속하고(`protocol_ok=0`으로 기록), `--strict-protocol`(`make real STRICT=1`)이면 **이 정적 검사의** 정보용 외 플래그(`governor=`, `epp=`, `taskset_missing`)가 있을 때 run 시작 시 **exit 4**로 중단한다. `--strict-protocol`의 효력은 여기까지다 — §9의 동적 플래그, §10의 `baseline_drift`·`paired_baseline_failed`, run 끝의 `model_served_mixed`는 strict 모드에서도 행에 **기록만** 하고 run을 멈추지 않는다(`run.py --help`: "정적 규약 플래그가 있으면 중단"). 측정 중 일시적 부하로 run 전체가 죽는 것보다 행 단위 `protocol_ok=0`으로 분석에서 가려내는 쪽을 택했다(decisions.md 2026-11-04).
+`ok = 정보용(turbo=, env_overrides_dropped) 외 플래그 없음`. 머신 프로필은 호스트별 `config/machines/<hostname>.yaml`(없으면 이전 위치 `config/machine.yaml`)이며, 그 `hostname`이 현재와 다르면 경고(재프로브 안내). `run.py`는 플래그가 있어도 경고 후 계속하고(`protocol_ok=0`으로 기록), `--strict-protocol`(`make real STRICT=1`)이면 **이 정적 검사의** 정보용 외 플래그(`governor=`, `epp=`, `taskset_missing`)가 있을 때 run 시작 시 **exit 4**로 중단한다. `--strict-protocol`의 효력은 여기까지다 — §9의 동적 플래그, §10의 `baseline_drift`·`paired_baseline_failed`, run 끝의 `model_served_mixed`는 strict 모드에서도 행에 **기록만** 하고 run을 멈추지 않는다(`run.py --help`: "정적 규약 플래그가 있으면 중단"). 측정 중 일시적 부하로 run 전체가 죽는 것보다 행 단위 `protocol_ok=0`으로 분석에서 가려내는 쪽을 택했다(decisions.md 2026-11-04).
 
 ## 9. 동적 규약 검사 (bench 직전마다, `protocol.check_dynamic`)
 
@@ -161,7 +161,7 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/energy_performa
 ```
 
 - 설정은 재부팅하면 `powersave`/`power`로 돌아온다. 측정 세션마다 다시 설정하고 `--check`로 확인한다.
-- `config/machine.yaml`의 `governor`·`epp`는 프로브 시점의 값이다. 실제 측정 시점의 값은 행의 `governor`·`epp`·`protocol_flags`에 따로 기록된다.
+- 머신 프로필(`config/machines/<hostname>.yaml`)의 `governor`·`epp`는 프로브 시점의 값이다. 실제 측정 시점의 값은 행의 `governor`·`epp`·`protocol_flags`에 따로 기록된다.
 - 하네스는 거버너를 **절대 바꾸지 않는다**(sudo 없음; 시스템 설정 변경 금지). 플래그를 달고 계속하거나(`governor_ok=0`), `--strict-protocol`이면 run 시작의 정적 검사에서 중단할 뿐이다(bench 직전의 동적 재확인은 strict여도 플래그만 단다, §8–§9).
 
 ## 14. 1024³ 는 L3 상주(warm-cache) 측정이다
