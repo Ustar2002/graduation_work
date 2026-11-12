@@ -52,6 +52,7 @@ COLUMNS: list[str] = [
     "warmup", "repeats", "repeats_reduced", "gflops",
     "baseline_time_ms", "baseline_time_cv", "baseline_samples_ms", "baseline_run_time_ms", "baseline_time_1t_ms",
     "baseline_drift_pct", "speedup_vs_baseline", "speedup_vs_baseline_1t",
+    "bench_rounds", "baseline_time_mean_ms", "speedup_mean", "speedup_ci_lo", "speedup_ci_hi", "speedup_rounds",
     "cpu_mhz_median", "cpu_mhz_min", "throttle_events", "temp_c_start", "temp_c_end",
     "compiler", "compiler_version", "cflags", "march_resolved", "threads", "cores", "omp_env",
     "governor", "governor_ok", "epp", "no_turbo", "load_1m", "load_ok", "pinned_busy_pct", "sibling_busy_pct",
@@ -93,7 +94,7 @@ _BOOL_FIELDS = frozenset({
 _INT_FIELDS = frozenset({
     "sample_idx", "turn", "max_tokens", "seed", "tokens_in", "tokens_out", "tokens_thinking", "tokens_text",
     "n_thinking_blocks", "n_warnings", "turns_to_pass", "nondeterministic_runs", "nondeterministic_bitwise_runs",
-    "warmup", "repeats", "throttle_events", "threads", "no_turbo", "test_seed", "asan_findings", "ubsan_findings",
+    "warmup", "repeats", "throttle_events", "threads", "bench_rounds", "no_turbo", "test_seed", "asan_findings", "ubsan_findings",
     "lint_findings_total", "lint_memory", "lint_numeric", "lint_concurrency", "lint_shape_dtype", "lint_api_misuse",
     "lint_performance",
 })
@@ -101,12 +102,13 @@ _FLOAT_FIELDS = frozenset({
     "temperature", "latency_ms", "build_time_ms", "check_max_abs_err", "check_max_tol_ratio", "time_median_ms",
     "time_mean_ms", "time_min_ms", "time_max_ms", "time_cv", "gflops", "baseline_time_ms", "baseline_time_cv",
     "baseline_run_time_ms", "baseline_time_1t_ms", "baseline_drift_pct", "speedup_vs_baseline",
-    "speedup_vs_baseline_1t", "cpu_mhz_median", "cpu_mhz_min", "temp_c_start", "temp_c_end", "load_1m",
+    "speedup_vs_baseline_1t", "baseline_time_mean_ms", "speedup_mean", "speedup_ci_lo", "speedup_ci_hi",
+    "cpu_mhz_median", "cpu_mhz_min", "temp_c_start", "temp_c_end", "load_1m",
     "pinned_busy_pct", "sibling_busy_pct", "roofline_pct",
 })
 _JSON_FIELDS = frozenset({
     "sampling", "undefined_symbols", "contract_violation", "check_tests", "time_samples_ms", "baseline_samples_ms",
-    "omp_env", "protocol_flags", "perf_summary",
+    "omp_env", "protocol_flags", "perf_summary", "speedup_rounds",
 })
 
 
@@ -195,6 +197,13 @@ class RunRow:
     baseline_drift_pct: float | None = None
     speedup_vs_baseline: float | None = None
     speedup_vs_baseline_1t: float | None = None
+    # 2026-11-12 측정 규약: 서로 다른 시각의 bench 라운드를 모은 값(harness/benchstats.py)
+    bench_rounds: int | None = None              # 합친 bench 라운드 수
+    baseline_time_mean_ms: float | None = None   # 교차 기준선 timed 호출 평균(라운드를 모은 값)
+    speedup_mean: float | None = None            # 기준선 평균 / 커널 평균
+    speedup_ci_lo: float | None = None           # speedup_mean 의 95% 층화 부트스트랩 신뢰구간
+    speedup_ci_hi: float | None = None
+    speedup_rounds: list[float] | None = None    # 라운드별 기준선 평균 / 커널 평균
     cpu_mhz_median: float | None = None
     cpu_mhz_min: float | None = None
     throttle_events: int | None = None
@@ -395,14 +404,28 @@ def check_header(header: list[str] | None, csv_path: Path) -> None:
         )
 
 
+def migrate_header_if_additive(header: list[str] | None, csv_path: Path) -> bool:
+    """헤더가 ``COLUMNS`` 의 부분집합이면(열이 추가되기만 한 이전 스키마) 새 헤더로 다시 쓴다(새 열은 빈 값).
+    다시 썼으면 True. 순서만 다르거나 모르는 열이 있으면 손대지 않는다(``check_header`` 가 오류를 낸다)."""
+    if header is None or header == COLUMNS or not set(header) < set(COLUMNS):
+        return False
+    _, rows = _read_csv_raw(csv_path)
+    _write_csv_atomic(csv_path, rows)
+    added = [c for c in COLUMNS if c not in header]
+    print(f"[schema] {csv_path}: 이전 스키마의 CSV 에 새 열 {added} 를 빈 값으로 더했다", file=sys.stderr)
+    return True
+
+
 def upsert_row(csv_path: Path, row: RunRow) -> bool:
-    """행을 CSV에 넣는다. 헤더가 없으면 쓰고, 있으면 열 일치를 검사한다.
+    """행을 CSV에 넣는다. 헤더가 없으면 쓰고, 있으면 열 일치를 검사한다(열이 추가되기만 한 이전 스키마는 옮겨 쓴다).
 
     같은 ``ROW_KEY`` 의 행은 교체한다(전체를 tmp에 다시 쓰고 ``os.replace``).
     교체했으면 True, 새로 추가했으면 False.
     """
     csv_path = Path(csv_path)
     header, existing = _read_csv_raw(csv_path)
+    if migrate_header_if_additive(header, csv_path):
+        header, existing = _read_csv_raw(csv_path)
     check_header(header, csv_path)
     new = row.to_csv_dict()
     key = row.key()

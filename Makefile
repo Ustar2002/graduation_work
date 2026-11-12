@@ -7,6 +7,7 @@
 #   make dummy [RUN_ID=…]          generate --provider dummy → run → aggregate --csv results/runs_dummy.csv
 #   make real RUN_ID=… [STRICT=1]  generate(확인 프롬프트) → run [--strict-protocol] → aggregate
 #   make aggregate [RUN_ID=…] [CSV=…]   RUN_ID 가 없으면 --latest
+#   make aa [TASKS=a,b]            A/A 점검: 기준선 대 기준선 교차 측정(측정 장치 치우침, fsync 유무 비교)
 #   make report                    중간보고서 PDF (report/interim/build.py; 먼저 `.venv/bin/pip install -r report/requirements.txt`)
 #
 # 모든 python 실행은 .venv/bin/python 이다(시스템 python3 는 `make venv` 에서 venv 를 만들 때만).
@@ -40,7 +41,7 @@ endif
 CSV ?=
 AGG_CSV := $(if $(CSV),--csv $(CSV),)
 
-.PHONY: help venv tests probe unittest dummy real aggregate report
+.PHONY: help venv tests probe unittest dummy real aggregate report aa
 
 help:
 	@echo "make venv                       .venv 생성 + requirements.txt 설치 (SYSPY=$(SYSPY))"
@@ -50,6 +51,7 @@ help:
 	@echo "make dummy [RUN_ID=…]           더미 응답으로 전체 파이프라인 → results/runs_dummy.csv"
 	@echo "make real RUN_ID=… [STRICT=1]   실제 LLM 호출(확인 프롬프트) → results/runs.csv"
 	@echo "make aggregate [RUN_ID=…] [CSV=…]   결과 집계 (기본 --latest, results/runs.csv)"
+	@echo "make aa [TASKS=a,b]              A/A 점검(기준선 대 기준선; 새 장비에서 측정 전에)"
 	@echo "make report                     중간보고서 PDF (results/runs.csv → report/interim/interim_report.pdf)"
 
 venv:
@@ -80,3 +82,8 @@ aggregate:
 # 중간보고서: runs.csv → 수치·그림 → Typst 조판. 본문 수치가 데이터와 다르면 빌드가 실패한다.
 report:
 	$(PYTHON) report/interim/build.py
+
+# A/A 점검: 과제의 기준선을 자기 자신과 교차 측정한다(docs/protocol.md §10.2). TASKS 가 없으면 run.tasks 전체.
+TASKS ?=
+aa:
+	$(PYTHON) -m harness.aa_check $(if $(TASKS),--tasks $(TASKS),)

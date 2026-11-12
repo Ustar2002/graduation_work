@@ -127,6 +127,14 @@ bench 예산 `budget = measurement.bench_timeout_s = 300 s`, 첫 warmup 호출 �
 - **진행 기록의 fsync**: 호출 쌍 사이에 진행 기록(`in_progress`)을 두 번 쓴다. `measurement.bench_loop_fsync`(기본 true)가 false 면 이 기록을 fsync 없이 쓴다(마지막 기록은 언제나 fsync). false 는 규약 변경 후보이며 아직 적용하지 않았다(decisions.md 2026-11-11).
 - **기록되지 않는 전제**: 이 머신의 libgomp 는 병렬 구간 뒤 스핀 대기를 하지 않는다(하이브리드 CPU 기본값). 스핀하는 런타임에서는 OpenMP 호출 직후의 호출이 느려지므로, 머신을 옮기면 `OMP_DISPLAY_ENV=verbose` 로 `OMP_WAIT_POLICY`·`GOMP_SPINCOUNT` 를 확인한다(decisions.md 2026-11-11 후보 (a)).
 
+### 10.2 라운드 반복과 평균 (2026-11-12, 11/11 면담 반영)
+
+- **라운드**: 구현마다 bench 를 `measurement.bench_rounds`(3)번, 매번 **새 워커 프로세스**로 돈다. 각 라운드는 워밍업 `warmup`(3) + timed `repeats`(10) 쌍의 교차 측정이다. 라운드 1 은 정확성 검사 직후에, 라운드 2 와 3 은 run 의 모든 샘플이 라운드 1 을 마친 뒤 라운드 번호 순으로 한 바퀴씩 돈다 — 같은 구현의 라운드들이 서로 다른 시각(사이에 다른 구현들의 측정이 낀)에 재진다. `bench_round_gap_s`(60)는 같은 구현의 연속 라운드 사이 최소 간격이다(작은 run 에서만 기다리게 된다). 결과 파일은 `bench.json`(라운드 1), `bench_r2.json`, `bench_r3.json`.
+- **행의 값**(`harness/benchstats.py`): 모든 라운드의 timed 호출을 모아 `time_median_ms`·`time_mean_ms`·`time_cv`·`baseline_time_ms`(중앙값)·`baseline_time_mean_ms` 를 낸다. `speedup_vs_baseline` = 기준선 중앙값 / 커널 중앙값(이전 정의), **`speedup_mean` = 기준선 평균 / 커널 평균(주 지표, `measurement.primary_speedup: mean`)**, `speedup_ci_lo`·`speedup_ci_hi` = `speedup_mean` 의 95% 층화 부트스트랩 구간(라운드마다 같은 쌍 번호로 커널·기준선을 함께 복원 추출, 2000회, 씨앗은 행 키에서), `speedup_rounds` = 라운드별 평균 비, `bench_rounds` = 오류 없이 끝난 라운드 수. `time_samples_ms`·`baseline_samples_ms` 에는 모든 호출과 라운드별 개수(`rounds`)가 남는다. 속도비는 모든 라운드가 오류 없이 끝난 pass 행에만 둔다. 어느 라운드에서든 크래시·틀린 출력·입력 변조·호출 간 불일치가 나면 그 라운드에서 멈추고 bench 단계 오류로 기록한다(bench 시간 초과만 pass 유지).
+- **이어 재기**: 중단된 run 을 같은 `--run-id` 로 다시 돌리면 남은 라운드만 돈다. 단, 라운드 1 에서 계획한 라운드 수(`rounds_planned`)와 환경 지문(env_hash)이 지금과 같은 행만 이어 잰다 — 이전 규약으로 잰 행은 섞지 않고 `--force` 로 다시 잰다.
+- **OpenMP 대기 방식**: `omp_env_extra` 에 `OMP_WAIT_POLICY=passive` 를 고정했다(병렬 구간 뒤 작업 스레드가 스핀하지 않는다; libgomp 판과 CPU 종류에 따라 기본값이 달라 교차 측정이 장비마다 다르게 흔들리지 않게).
+- **A/A 점검**(`make aa` = `python -m harness.aa_check`): 과제의 기준선을 커널 자리와 기준선 자리에 함께 넣어 교차 측정한다. 속도비는 1 이어야 하고, 호출 쌍의 첫 호출 / 둘째 호출 중앙값 비(`first_vs_second`)도 1 이어야 한다. 쌍 사이 진행 기록의 fsync 유무(`fsync`, `nofsync`) 두 변형을 라운드마다 순서를 바꿔 잰다. 새 장비에서 측정 전에 돌려 `measurement.bench_loop_fsync` 를 정한다(요약 `results/aa/<run_id>.json`).
+
 ## 11. 주파수·스로틀·온도 샘플링
 
 - 각 timed 호출 직후 고정 코어들(`os.sched_getaffinity(0)` — **커널 로드 전에** 읽어 둔 집합; libgomp는 `OMP_PROC_BIND=true`면 로드 시점에 주 스레드를 place 0에 묶어 로드 후 친화도가 CPU 1개로 좁아진다, 실측 2026-11-04)의 `scaling_cur_freq`(kHz → MHz)를 읽어 `cpu_mhz_samples`에 쌓는다 → 행 `cpu_mhz_median`, `cpu_mhz_min`. powersave/EPP=power에서는 이 값이 1.3–1.7 GHz에 머문다(실측) — 거버너를 바꾸지 않은 측정은 이 열로 드러난다.

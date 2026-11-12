@@ -33,6 +33,7 @@ import json
 import re
 import socket
 import sys
+import time
 import traceback
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -50,6 +51,7 @@ from harness.paths import (
 )
 from harness.procutil import ProcResult, install_terminate_handlers, run_isolated
 from harness.protocol import StaticStatus, now_iso
+from harness.benchstats import combine_rounds, seed_of
 from harness.schema import RunRow, harness_version, rebuild_csvs, upsert_row
 from harness.taskspec import TaskSpec, load_taskspec
 
@@ -538,34 +540,6 @@ def apply_check_doc(row: RunRow, doc: dict[str, Any]) -> None:
         row.numpy_blas = blas_string(doc.get("blas"))
 
 
-def apply_bench_doc(row: RunRow, doc: dict[str, Any]) -> None:
-    """bench 결과 문서(완전/부분)에서 시간·주파수·온도 열을 채운다(timeout 행도 부분값 기록)."""
-    row.time_samples_ms = {"warmup": list(doc.get("warmup_ms") or []), "timed": list(doc.get("timed_ms") or [])}
-    row.warmup = doc.get("warmup")
-    row.repeats = doc.get("repeats")
-    row.repeats_reduced = bool(doc.get("repeats_reduced")) if doc.get("repeats_reduced") is not None else None
-    row.cpu_mhz_median = doc.get("cpu_mhz_median")
-    row.cpu_mhz_min = doc.get("cpu_mhz_min")
-    row.throttle_events = doc.get("throttle_events")
-    row.temp_c_start = doc.get("temp_c_start")
-    row.temp_c_end = doc.get("temp_c_end")
-    row.nondeterministic_runs = doc.get("nondeterministic_runs")
-    row.nondeterministic_bitwise_runs = doc.get("nondeterministic_bitwise_runs")
-    if doc.get("inputs_mutated"):
-        row.inputs_mutated = True
-    if doc.get("oob_write"):
-        row.oob_write = True
-
-
-def apply_bench_times(row: RunRow, doc: dict[str, Any]) -> None:
-    row.time_median_ms = doc.get("median_ms")
-    row.time_mean_ms = doc.get("mean_ms")
-    row.time_min_ms = doc.get("min_ms")
-    row.time_max_ms = doc.get("max_ms")
-    row.time_cv = doc.get("cv")
-    row.gflops = doc.get("gflops")
-
-
 def needs_processing(ctx: RunContext, task: str, raw_path: Path) -> bool:
     """process_sample 의 건너뜀 조건(result.json 의 raw_sha256 일치)을 미리 평가한다. 디렉터리를 만들지 않는다.
     --force 면 항상 True. 읽을 수 없는 raw·설정에 없는 언어는 process_sample 이 무시하므로 False."""
@@ -737,9 +711,38 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
         finalize_row(ctx, row, sample_dir, raw_sha256, stages)
         return row, "processed"
 
-    # 7. 동적 규약 검사 → 대응 기준선 → 샘플 bench
+    # 7. bench 라운드 1(동적 규약 검사 → 교차 측정). 라운드 2.. 는 모든 샘플의 라운드 1 이 끝난 뒤 _main 이 돈다
+    #    (2026-11-12 규약: 같은 구현의 라운드들이 서로 다른 시각에 재지도록).
+    row.baseline_run_time_ms = (tctx.baseline_run or {}).get("median_ms")
+    row.baseline_time_1t_ms = (tctx.baseline_1t or {}).get("median_ms")
+    stages["bench_artifact"] = rel_to_root(br.artifact)
+    stages["rounds_planned"] = m.bench_rounds
+    stages["rounds"] = []
+    run_bench_round(ctx, tctx, row, lang, br.artifact, sample_dir, stages, 1)
+    apply_rounds(row, stages)
+    finalize_row(ctx, row, sample_dir, raw_sha256, stages)
+    return row, "processed"
+
+
+def round_file(round_idx: int) -> str:
+    """라운드의 bench 결과 파일 이름: 1 → bench.json(이전 규약과 같은 이름), r → bench_r<r>.json."""
+    return "bench.json" if round_idx == 1 else f"bench_r{round_idx}.json"
+
+
+def run_bench_round(ctx: RunContext, tctx: TaskContext, row: RunRow, lang: LanguageCfg, artifact: Path, sample_dir: Path,
+                    stages: dict[str, Any], round_idx: int) -> str:
+    """bench 라운드 하나: 동적 규약 검사 → 교차 측정 워커 → 라운드 판정. 상태("ok" | "error")를 돌려준다.
+
+    결과 문서는 ``sample_dir/round_file(round_idx)``, 요약은 ``stages["rounds"]`` 에 쌓인다. 오류(시간 초과·크래시·틀린 출력·
+    입력 변조·범위 밖 쓰기·호출 간 불일치)면 행의 오류 열을 채운다 — bench 시간 초과만 pass 를 유지한다(성능 실패).
+    시간 통계와 속도비는 ``apply_rounds`` 가 모든 라운드를 모아 계산한다."""
+    cfg = ctx.cfg
+    m = cfg.measurement
+    language = lang.name
+    openmp = lang.backend == "c" and lang.openmp
     dyn = protocol.check_dynamic(cfg)
-    stages["dynamic"] = asdict(dyn)
+    if round_idx == 1:
+        stages["dynamic"] = asdict(dyn)
     row.load_1m, row.load_ok = dyn.load_1m, dyn.load_ok
     row.pinned_busy_pct, row.sibling_busy_pct = dyn.pinned_busy_pct, dyn.sibling_busy_pct
     row.governor, row.governor_ok = dyn.governor, dyn.governor_ok
@@ -747,29 +750,27 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
     for f in dyn.flags:
         add_flag(row, f)
 
-    base_run = tctx.baseline_run or {}
-    row.baseline_run_time_ms = base_run.get("median_ms")
-    row.baseline_time_1t_ms = (tctx.baseline_1t or {}).get("median_ms")
-    # 7-b. 교차 측정(2026-11-09): 커널과 기준선을 같은 워커에서 번갈아 호출한다. 그래서 bench 는 언어와 무관하게
-    #      measurement.cores(4코어)·measurement.threads 로 띄운다(c_seq 커널은 런타임이 없어 스레드 수에 영향받지 않고,
-    #      pthread 사용은 contract_violation 으로 따로 기록된다). check 단계의 언어별 고정은 그대로다.
-    #      호출 동안의 주 스레드 친화도(2026-11-11)는 bench_plan → protocol.call_cpus 가 정한다: 한 프로세스에 OpenMP 코드가
-    #      함께 로드되면 libgomp 가 주 스레드를 CPU 하나에 묶으므로, OpenMP 가 아닌 코드를 부르는 동안에는 그 언어의 규약 집합을 적용한다.
+    # 교차 측정(2026-11-09): 커널과 기준선을 같은 워커에서 번갈아 호출한다. 그래서 bench 는 언어와 무관하게
+    # measurement.cores·measurement.threads 로 띄운다. 호출 동안의 주 스레드 친화도(2026-11-11)는 bench_plan →
+    # protocol.call_cpus 가 정한다: 한 프로세스에 OpenMP 코드가 함께 로드되면 libgomp 가 주 스레드를 CPU 하나에 묶으므로,
+    # OpenMP 가 아닌 코드를 부르는 동안에는 그 언어의 규약 집합을 적용한다.
     plan = bench_plan(cfg, backend=lang.backend, openmp=openmp, threads=lang.threads, baseline=tctx.spec.baseline)
     try:
         b_artifact = baseline_artifact(ctx, tctx, ensure_dir(baseline_dir(cfg.paths.built_dir, ctx.run_id, tctx.task)))
     except (BaselineError, FileNotFoundError) as e:
-        warn(f"{language}/sample_{sample_idx}: 기준선을 준비하지 못했다({e}); 교차 측정 없이 bench")
+        warn(f"{language}/sample_{row.sample_idx}: 기준선을 준비하지 못했다({e}); 교차 측정 없이 bench")
         b_artifact = None
     extra = bench_args(cfg)
     if b_artifact is not None:
         extra += ["--baseline-backend", str(tctx.spec.baseline["backend"]), "--baseline-artifact", str(b_artifact)]
     extra += plan.worker_args(with_baseline=b_artifact is not None)
-    oc = run_worker(cfg, stage="bench", threads=plan.threads, openmp=plan.openmp_env, backend=lang.backend, artifact=br.artifact,
+    out_name = round_file(round_idx)
+    stage = Path(out_name).stem
+    oc = run_worker(cfg, stage=stage, threads=plan.threads, openmp=plan.openmp_env, backend=lang.backend, artifact=artifact,
                     mode="bench", tests=[tctx.test_path(m.performance_test)], tolerance=tctx.tolerance_path, signatures=tctx.spec.path,
-                    out_path=sample_dir / "bench.json", cwd=sample_dir, timeout_s=m.bench_timeout_s,
+                    out_path=sample_dir / out_name, cwd=sample_dir, timeout_s=m.bench_timeout_s,
                     args_mode=row.args or "positional", extra=extra)
-    stages["bench"] = oc.summary()
+    stages[stage] = oc.summary()
     if oc.stdout_bytes > 0:
         add_violation(row, "stdout_output")
     if oc.doc and oc.doc.get("blas"):
@@ -781,49 +782,106 @@ def process_sample(ctx: RunContext, tctx: TaskContext, raw_path: Path) -> tuple[
     row.omp_env = omp_env_of(protocol.launch_env(cfg, plan.threads, openmp=plan.openmp_env))
     if oc.doc and (oc.doc.get("call_affinity") or {}).get("error"):
         add_flag(row, "call_affinity_failed")
-    if oc.doc and isinstance(oc.doc.get("call_affinity"), dict):
+    if oc.doc and isinstance(oc.doc.get("call_affinity"), dict) and round_idx == 1:
         stages["call_affinity"] = oc.doc["call_affinity"]
-    bdoc_i = (oc.doc or {}).get("baseline_interleaved")
-    if bdoc_i and bdoc_i.get("classification") == "pass" and bdoc_i.get("median_ms"):
-        row.baseline_time_ms = bdoc_i.get("median_ms")
-        row.baseline_time_cv = bdoc_i.get("cv")
-        row.baseline_samples_ms = {"warmup": list(bdoc_i.get("warmup_ms") or []), "timed": list(bdoc_i.get("timed_ms") or [])}
-        # baseline_drift_pct 와 drift 플래그는 run 끝에서 정한다(patch_baseline_drift: 과제별 대응 기준선 중앙값 기준).
-    else:
-        why = (bdoc_i or {}).get("error_detail") or (bdoc_i or {}).get("classification") or "없음"
-        if (oc.doc or {}).get("classification") not in ("timeout", "runtime_crash"):
-            warn(f"{language}/sample_{sample_idx}: 교차 기준선 실패({why}); speedup_vs_baseline 은 NA")
-            add_flag(row, FLAG_PAIRED_FAILED)
-
     row.bench_ran = True
-    if oc.doc:
-        apply_bench_doc(row, oc.doc)
+
+    status = "ok"
     verdict = oc.verdict()
+    bdoc = oc.doc or {}
     if verdict is not None:
         row.error_stage, (row.error_type, row.error_detail) = "bench", verdict
         row.passed = verdict[0] == "timeout"  # bench timeout 만 pass 유지(성능 실패이지 정확성 실패가 아님)
-        finalize_row(ctx, row, sample_dir, raw_sha256, stages)
-        return row, "processed"
-    bdoc = oc.doc or {}
-    cls = str(bdoc.get("classification") or "")
-    if cls == "timeout":
-        row.error_stage, row.error_type, row.error_detail = "bench", "timeout", str(bdoc.get("error_detail") or "")
-        row.passed = True
-    elif cls != "pass" or bdoc.get("inputs_mutated") or bdoc.get("oob_write") or (bdoc.get("nondeterministic_runs") or 0) > 0:
-        apply_bench_times(row, bdoc)
-        row.error_stage = "bench"
-        row.error_type = cls if cls and cls != "pass" else "wrong_output"
-        row.error_detail = str(bdoc.get("error_detail") or "")
-        row.passed = False
+        status = "error"
     else:
-        apply_bench_times(row, bdoc)
-        if row.time_median_ms:
-            if row.baseline_time_ms is not None:
-                row.speedup_vs_baseline = row.baseline_time_ms / row.time_median_ms
-            if row.baseline_time_1t_ms is not None:
-                row.speedup_vs_baseline_1t = row.baseline_time_1t_ms / row.time_median_ms
-    finalize_row(ctx, row, sample_dir, raw_sha256, stages)
-    return row, "processed"
+        cls = str(bdoc.get("classification") or "")
+        if cls == "timeout":
+            row.error_stage, row.error_type, row.error_detail = "bench", "timeout", str(bdoc.get("error_detail") or "")
+            row.passed = True
+            status = "error"
+        elif cls != "pass" or bdoc.get("inputs_mutated") or bdoc.get("oob_write") or (bdoc.get("nondeterministic_runs") or 0) > 0:
+            row.error_stage = "bench"
+            row.error_type = cls if cls and cls != "pass" else "wrong_output"
+            row.error_detail = str(bdoc.get("error_detail") or "")
+            row.passed = False
+            status = "error"
+    if status == "ok":
+        bdoc_i = bdoc.get("baseline_interleaved")
+        if not (bdoc_i and bdoc_i.get("classification") == "pass" and bdoc_i.get("median_ms")):
+            why = (bdoc_i or {}).get("error_detail") or (bdoc_i or {}).get("classification") or "없음"
+            warn(f"{language}/sample_{row.sample_idx} 라운드 {round_idx}: 교차 기준선 실패({why}); 이 라운드는 속도비에서 빠진다")
+            add_flag(row, FLAG_PAIRED_FAILED)
+    if round_idx > 1:
+        info(f"{row.task}/{language}/sample_{row.sample_idx}: bench 라운드 {round_idx}/{m.bench_rounds} {status}"
+             + (f" ({row.error_type}: {row.error_detail})" if status == "error" else ""))
+    stages.setdefault("rounds", []).append({
+        "round": round_idx, "status": status, "result_file": rel_to_root(sample_dir / out_name),
+        "finished_at": time.time(), "dynamic_flags": list(dyn.flags),
+    })
+    return status
+
+
+def apply_rounds(row: RunRow, stages: dict[str, Any]) -> None:
+    """끝난 bench 라운드들의 결과 문서를 모아 행의 시간·기준선·속도비 열을 채운다(harness/benchstats.py).
+
+    속도비는 모든 라운드가 오류 없이 끝난 pass 행에만 둔다. bench 시간 초과 행은 이전 규약처럼 시간 통계를 비워 둔다."""
+    rounds = stages.get("rounds") or []
+    docs: list[dict[str, Any]] = []
+    for rd in rounds:
+        path = Path(rd.get("result_file") or "")
+        doc = read_json(path if path.is_absolute() else ROOT / path)
+        if doc:
+            docs.append(doc)
+    if not docs:
+        return
+    comb = combine_rounds(docs, seed=seed_of(row.key()))
+    row.time_samples_ms = comb["time_samples_ms"]
+    row.warmup, row.repeats, row.repeats_reduced = comb["warmup"], comb["repeats"], comb["repeats_reduced"]
+    row.cpu_mhz_median, row.cpu_mhz_min, row.throttle_events = comb["cpu_mhz_median"], comb["cpu_mhz_min"], comb["throttle_events"]
+    row.temp_c_start, row.temp_c_end = comb["temp_c_start"], comb["temp_c_end"]
+    row.nondeterministic_runs, row.nondeterministic_bitwise_runs = comb["nondeterministic_runs"], comb["nondeterministic_bitwise_runs"]
+    if comb["inputs_mutated"]:
+        row.inputs_mutated = True
+    if comb["oob_write"]:
+        row.oob_write = True
+    row.bench_rounds = sum(1 for rd in rounds if rd.get("status") == "ok")
+    k = comb["kernel"]
+    if row.error_type != "timeout":
+        row.time_median_ms, row.time_mean_ms = k["median_ms"], k["mean_ms"]
+        row.time_min_ms, row.time_max_ms, row.time_cv = k["min_ms"], k["max_ms"], k["cv"]
+        row.gflops = comb["gflops"]
+    b = comb["baseline"]
+    if b is not None:
+        row.baseline_time_ms, row.baseline_time_mean_ms, row.baseline_time_cv = b["median_ms"], b["mean_ms"], b["cv"]
+        row.baseline_samples_ms = comb["baseline_samples_ms"]
+    clean = bool(row.passed) and not row.error_type and all(rd.get("status") == "ok" for rd in rounds)
+    if clean and row.time_median_ms:
+        row.speedup_vs_baseline = comb["speedup_median"]
+        row.speedup_mean = comb["speedup_mean"]
+        row.speedup_ci_lo, row.speedup_ci_hi = comb["speedup_ci"]
+        row.speedup_rounds = comb["speedup_rounds"] or None
+        if row.baseline_time_1t_ms is not None:
+            row.speedup_vs_baseline_1t = row.baseline_time_1t_ms / row.time_median_ms
+    else:
+        row.speedup_vs_baseline = row.speedup_mean = row.speedup_ci_lo = row.speedup_ci_hi = None
+        row.speedup_rounds = None
+        row.speedup_vs_baseline_1t = None
+
+
+def next_round(ctx: RunContext, row: RunRow, stages: dict[str, Any]) -> int | None:
+    """이 행에 다음으로 돌 bench 라운드 번호(없으면 None).
+
+    다음 라운드를 도는 조건: 라운드 1 에서 계획한 수(``rounds_planned``)가 지금 설정과 같고, 같은 환경 지문(env_hash)이며,
+    지금까지의 라운드가 모두 오류 없이 끝난 pass 행. 계획이 다른 행(이전 규약으로 잰 행)은 섞지 않는다 — ``--force`` 로 다시 잰다."""
+    planned = stages.get("rounds_planned")
+    rounds = stages.get("rounds") or []
+    if ctx.skip_bench or not row.bench_ran or not row.passed or row.error_type or not rounds:
+        return None
+    if planned != ctx.cfg.measurement.bench_rounds or row.env_hash != ctx.env_hash:
+        return None
+    if any(rd.get("status") != "ok" for rd in rounds) or len(rounds) >= int(planned):
+        return None
+    return len(rounds) + 1
 
 
 # ----------------------------------------------------------------------------- raw 탐색·요약 (4, 10)
@@ -1058,6 +1116,39 @@ def _main(ns: argparse.Namespace) -> int:
             n_skipped += 1
         built = Path(row.built_path or "")
         processed.append((row, (built if built.is_absolute() else ROOT / built) / RESULT_JSON))
+
+    # 9-b. bench 라운드 2..R (2026-11-12 규약). 모든 샘플의 라운드 1 이 끝난 뒤 라운드 번호 순으로 한 바퀴씩 돌아,
+    #      같은 구현의 라운드들이 서로 다른 시각(다른 구현들의 측정이 사이에 낀)에 재지게 한다.
+    n_rounds = cfg.measurement.bench_rounds
+    gap = cfg.measurement.bench_round_gap_s
+    if n_rounds > 1 and not ns.skip_bench:
+        for r in range(2, n_rounds + 1):
+            for i, (row, result_path) in enumerate(processed):
+                data = read_json(result_path) or {}
+                stages = data.get("stages") or {}
+                if next_round(ctx, row, stages) != r:
+                    continue
+                last = (stages.get("rounds") or [{}])[-1].get("finished_at")
+                if gap > 0 and last is not None:
+                    wait = gap - (time.time() - float(last))
+                    if wait > 0:
+                        info(f"{row.task}/{row.language}/sample_{row.sample_idx}: 라운드 간격 {gap:g}s 를 채우려 {wait:.0f}s 기다림")
+                        time.sleep(wait)
+                tctx = ctx.tasks[str(row.task)]
+                lang = cfg.languages[str(row.language)]
+                art = Path(str(stages.get("bench_artifact") or ""))
+                artifact = art if art.is_absolute() else ROOT / art
+                if not artifact.exists():
+                    warn(f"{row.task}/{row.language}/sample_{row.sample_idx}: bench 산출물 {artifact} 가 없어 라운드 {r} 을 건너뜀")
+                    continue
+                try:
+                    run_bench_round(ctx, tctx, row, lang, artifact, result_path.parent, stages, r)
+                except HarnessError as e:
+                    print(f"{_LOG} harness_error — 라운드 {r} 중단 ({row.task}/{row.language}/sample_{row.sample_idx}):\n{e}", file=sys.stderr)
+                    return EXIT_HARNESS
+                apply_rounds(row, stages)
+                finalize_row(ctx, row, result_path.parent, str(data.get("raw_sha256") or ""), stages)
+                processed[i] = (row, result_path)
 
     # 10. 요약
     patch_baseline_drift(ctx, processed)

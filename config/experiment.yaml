@@ -46,9 +46,12 @@ measurement:
   cores: "0,2,4,6"             # taskset -c (P-core 4개, SMT 형제 제외)
   single_core: "2"             # threads==1 언어의 import·check 단계 taskset. bench 는 cores 로 뜨고 c_seq 커널은 호출 동안 cores 의 첫 CPU 에 묶인다(docs/protocol.md §10.1)
   threads: 4                   # OMP_NUM_THREADS / OPENBLAS_NUM_THREADS / MKL_NUM_THREADS
-  omp_env_extra: {OMP_PROC_BIND: "true", OMP_PLACES: "cores", OMP_DYNAMIC: "false"}   # OpenMP 백엔드 워커에만
-  warmup: 3
-  repeats: 10
+  omp_env_extra: {OMP_PROC_BIND: "true", OMP_PLACES: "cores", OMP_DYNAMIC: "false", OMP_WAIT_POLICY: "passive"}   # OpenMP 코드가 있는 워커에만. WAIT_POLICY 는 2026-11-12 고정(병렬 구간 뒤 스핀 금지; libgomp 판·CPU 에 따라 기본값이 달라 교차 측정이 흔들리지 않게)
+  warmup: 3                    # 라운드마다
+  repeats: 10                  # 라운드마다 timed 호출 수
+  bench_rounds: 3              # 2026-11-12(면담): 서로 다른 시각의 별도 워커에서 3라운드 → 평균·95% 신뢰구간·중앙값
+  bench_round_gap_s: 60        # 같은 구현의 연속 라운드 사이 최소 간격(초). 전체 run 에서는 다른 구현들이 사이에 끼므로 보통 기다리지 않는다
+  primary_speedup: mean        # 분석의 주 지표: speedup_mean(기준선 평균 / 커널 평균). speedup_vs_baseline(중앙값 비)도 함께 기록
   min_repeats: 3               # 느린 커널에서 예산 안에 맞추려 줄일 때의 하한 (repeats_reduced=1 플래그)
   check_repeats: 2             # 정확성 테스트마다 호출 횟수 (실행 간 불일치 = race 탐지)
   check_timeout_s: 180

@@ -28,7 +28,8 @@ CLI:
     n_repeats_reduced   repeats_reduced=1 인 행 수(느린 커널의 반복 축소)
     n_protocol_flagged  protocol_ok=0 이거나 protocol_flags 에 정보용 외 플래그가 있는 행 수
     time_median_ms      pass 행들의 time_median_ms 중앙값(bench timeout 행은 시간 NA 라 제외)
-    speedup_*           pass 행들의 speedup_vs_baseline 중앙값/최소/최대, speedup_1t_median 은 1스레드 기준선 대비
+    speedup_*           pass 행들의 speedup_vs_baseline(기준선 중앙값 / 커널 중앙값) 중앙값/최소/최대, speedup_1t_median 은 1스레드 기준선 대비
+    speedup_mean_median pass 행들의 speedup_mean(기준선 평균 / 커널 평균; 2026-11-12 규약의 주 지표, 라운드를 모은 값) 중앙값
     tokens_out_mean     tokens_out(thinking 포함) 평균 — 토큰 값이 있는 모든 행(절단 행 포함)
     tokens_text_mean    tokens_text 평균
     tokens_per_pass     Σ(tokens_in + tokens_out) / n_pass (토큰 값이 있는 모든 행의 합; n_pass=0 이면 NA)
@@ -64,7 +65,7 @@ GROUP_KEY: tuple[str, ...] = (
 METRIC_COLUMNS: tuple[str, ...] = (
     "n_rows", "n", "n_pass", "pass_at_1", "pass_at_5", "pass_at_n",
     "n_generate_failed", "n_refusal", "n_truncated", "benchmarked", "n_repeats_reduced", "n_protocol_flagged",
-    "time_median_ms", "speedup_median", "speedup_min", "speedup_max", "speedup_1t_median",
+    "time_median_ms", "speedup_median", "speedup_min", "speedup_max", "speedup_mean_median", "speedup_1t_median",
     "tokens_out_mean", "tokens_text_mean", "tokens_per_pass", "tokens_out_per_pass", "error_types",
 )
 
@@ -74,6 +75,8 @@ _NUMERIC_COLUMNS: tuple[str, ...] = (
     "tokens_in", "tokens_out", "tokens_text", "time_median_ms", "speedup_vs_baseline", "speedup_vs_baseline_1t",
     "baseline_time_ms", "baseline_run_time_ms", "baseline_time_1t_ms", "baseline_drift_pct",
 )
+# 2026-11-12 규약(라운드 평균)의 열. 이전 CSV 에는 없을 수 있어 필수로 두지 않는다(없으면 NaN).
+_OPTIONAL_NUMERIC_COLUMNS: tuple[str, ...] = ("speedup_mean", "speedup_ci_lo", "speedup_ci_hi", "bench_rounds")
 _TEXT_COLUMNS: tuple[str, ...] = (
     "created_at", "sample_idx", "error_stage", "error_detail", "error_type", "stop_reason", "api_error",
     "protocol_flags", "model_served", "effort",
@@ -195,6 +198,8 @@ def convert_types(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = _to_bool(out[col])
     for col in _NUMERIC_COLUMNS:
         out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64")
+    for col in _OPTIONAL_NUMERIC_COLUMNS:
+        out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64") if col in out.columns else math.nan
     return out
 
 
@@ -277,6 +282,7 @@ def group_metrics(g: pd.DataFrame) -> dict[str, Any]:
     times = g.loc[passed, "time_median_ms"]
     speedup = g.loc[passed, "speedup_vs_baseline"]
     speedup_1t = g.loc[passed, "speedup_vs_baseline_1t"]
+    speedup_mean = g.loc[passed, "speedup_mean"]   # 샘플마다 (기준선 평균 / 커널 평균), 라운드를 모은 값(2026-11-12)
 
     tokens_in = g["tokens_in"]
     tokens_out = g["tokens_out"]
@@ -302,6 +308,7 @@ def group_metrics(g: pd.DataFrame) -> dict[str, Any]:
         "speedup_median": float(speedup.median()),
         "speedup_min": float(speedup.min()),
         "speedup_max": float(speedup.max()),
+        "speedup_mean_median": float(speedup_mean.median()),
         "speedup_1t_median": float(speedup_1t.median()),
         "tokens_out_mean": float(tokens_out.mean()),
         "tokens_text_mean": float(tokens_text.mean()),
@@ -422,7 +429,7 @@ def _fmt(ndigits: int) -> Callable[[Any], str]:
 _FORMATTERS: dict[str, Callable[[Any], str]] = {
     **{c: _fmt(3) for c in ("pass_at_1", "pass_at_5", "pass_at_n")},
     **{c: _fmt(2) for c in ("time_median_ms",)},
-    **{c: _fmt(3) for c in ("speedup_median", "speedup_min", "speedup_max", "speedup_1t_median")},
+    **{c: _fmt(3) for c in ("speedup_median", "speedup_min", "speedup_max", "speedup_mean_median", "speedup_1t_median")},
     **{c: _fmt(0) for c in ("tokens_out_mean", "tokens_text_mean", "tokens_per_pass", "tokens_out_per_pass")},
 }
 

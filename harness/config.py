@@ -131,6 +131,11 @@ class MeasurementCfg:
     # bench 루프 안(호출 쌍 사이)의 진행 기록을 fsync 할지. True 는 2026-11-11 이전과 같은 동작이다(쌍 사이에 fsync 두 번이
     # 끼어 쌍의 첫 호출만 유휴 뒤에 시작한다). False 는 규약 변경이므로 사용자 승인 뒤에만 쓴다(decisions.md 2026-11-11).
     bench_loop_fsync: bool = True
+    # 2026-11-12 측정 규약(11/11 면담: 반복 횟수를 늘려 평균): 구현마다 서로 다른 시각의 별도 워커에서 bench 를 이만큼 돈다.
+    # 1 이면 이전 규약과 같다. 라운드 사이 최소 간격(초)은 같은 구현의 연속 라운드가 너무 붙지 않게 하는 안전장치다.
+    bench_rounds: int = 1
+    bench_round_gap_s: float = 0.0
+    primary_speedup: str = "median"   # 분석의 주 지표: "mean"(speedup_mean) | "median"(speedup_vs_baseline)
 
 
 @dataclass(frozen=True)
@@ -390,7 +395,7 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
             "require_performance_governor", "baseline_min_gflops", "baseline_drift_pct_max", "correctness_tests",
             "performance_test",
         ),
-        optional=("bench_loop_fsync",),
+        optional=("bench_loop_fsync", "bench_rounds", "bench_round_gap_s", "primary_speedup"),
     )
     cores = str(obj["cores"]).strip()
     single_core = str(obj["single_core"]).strip()
@@ -441,6 +446,9 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
         correctness_tests=_str_list(obj, p, "correctness_tests", nonempty=True),
         performance_test=_str(obj, p, "performance_test"),
         bench_loop_fsync=_bool(obj, p, "bench_loop_fsync") if "bench_loop_fsync" in obj else True,
+        bench_rounds=int(_num(obj, p, "bench_rounds", min_value=1.0)) if "bench_rounds" in obj else 1,
+        bench_round_gap_s=_num(obj, p, "bench_round_gap_s", min_value=0.0) if "bench_round_gap_s" in obj else 0.0,
+        primary_speedup=_str(obj, p, "primary_speedup", allowed=("mean", "median")) if "primary_speedup" in obj else "median",
     )
 
 
