@@ -1,0 +1,7 @@
+# 손으로 조립한 로그다(이 머신에 gcc 가 없다): gcc 15 의 -fopt-info-vec-optimized/-missed 줄 모양을 같은 이름의 .c 줄·열에 맞췄다. Linux 에서 실제 build.log 로 확인한다.
+kernel.c:11:27: optimized: loop vectorized using 32 byte vectors
+kernel.c:11:27: optimized: loop vectorized using 16 byte vectors
+kernel.c:7:23: missed: couldn't vectorize loop
+kernel.c:7:23: missed: not vectorized: unsupported control flow in loop.
+kernel.c:26:23: missed: couldn't vectorize loop
+kernel.c:26:23: missed: not vectorized: unsupported control flow in loop.

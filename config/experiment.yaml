@@ -1,6 +1,6 @@
 run:
   tasks: [gemm, jacobi2d, spmv_csr, dot, histogram, scan, nbody, sort, cholesky, floyd_warshall, bfs, fft]   # Tier 1(M2a) + Tier 2(M2b, 2026-11-08; docs/harness_design.md §17)
-  languages: [numpy, c_seq, c_openmp]
+  languages: [numpy, c_seq, c_openmp]   # 기본값. M3 언어(numba, halide_auto, halide_manual, rust)는 --languages 로 고른다
   n_samples: 5                 # M1=3, M2부터 5 (CLAUDE.md §1)
   max_repair_turns: 0          # M1=0 (설계 상한 3; M4)
   conditions:
@@ -30,6 +30,12 @@ languages:
   numpy:    {backend: python, prompt: prompts/lang/numpy.md,    threads: measurement}
   c_seq:    {backend: c,      prompt: prompts/lang/c_seq.md,    openmp: false, threads: 1}
   c_openmp: {backend: c,      prompt: prompts/lang/c_openmp.md, openmp: true,  threads: measurement}
+  # M3 언어(설계 v3 §3). env 는 워커 환경에 더해진다(값의 ${threads} 는 그 언어의 스레드 수). halide_mode 는 halide 백엔드에 필수.
+  # omp_runtime: 커널이 OpenMP 런타임(libgomp) 위에서 도는 언어 — bench 에서 libgomp 의 고정을 그대로 두고 omp_env_extra 를 받는다(c_openmp 는 openmp 에서 정해짐).
+  numba:         {backend: numba,  prompt: prompts/lang/numba.md,         threads: measurement, omp_runtime: true, env: {NUMBA_NUM_THREADS: "${threads}", NUMBA_THREADING_LAYER: omp}}
+  halide_auto:   {backend: halide, prompt: prompts/lang/halide_auto.md,   threads: measurement, halide_mode: auto,   env: {HL_NUM_THREADS: "${threads}"}}
+  halide_manual: {backend: halide, prompt: prompts/lang/halide_manual.md, threads: measurement, halide_mode: manual, env: {HL_NUM_THREADS: "${threads}"}}
+  rust:          {backend: rust,   prompt: prompts/lang/rust.md,          threads: measurement, env: {RAYON_NUM_THREADS: "${threads}"}}
 
 build:
   cc: gcc
@@ -41,6 +47,13 @@ build:
   compile_timeout_s: 60
   forbidden_symbols: ["pthread_create", "clone", "fork", "vfork", "system", "popen", "execve", "execv", "execl"]
   thread_symbols_prefix: ["pthread_create", "GOMP_", "omp_", "__kmpc_"]   # c_seq에서 검출 시 contract_violation
+  rust: {cargo: cargo, rustflags: ["-C", "target-cpu=native"], rustflags_linux: ["-C", "link-arg=-Wl,--no-undefined"], build_timeout_s: 600, offline: true}   # RUSTFLAGS = rustflags (+ Linux 에서만 rustflags_linux) 와 `cargo build --release [--offline] --locked`. 프롬프트에 공개. cargo 는 PATH → $CARGO_HOME/bin → ~/.cargo/bin 에서 찾는다(2026-11-12 결정)
+  sanitize_flags: ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]                   # safety.enabled 일 때 cflags 뒤에 붙는 ASan/UBSan 빌드 플래그
+
+halide: {autoscheduler: Li2018, autoscheduler_params: {}}   # halide_auto 에만 적용(2026-11-12 결정; Adams2019·Mullapudi2016 은 민감도 분석용). parallelism 은 하네스가 스레드 수로 넣는다(여기서 줄 수 없다). 받는 매개변수: Li2018 없음, Mullapudi2016 last_level_cache_size·balance, Adams2019 beam_size
+safety: {enabled: false, timeout_s: 300}          # ASan/UBSan (C 백엔드만). 실험 때 켠다
+lint:   {enabled: true, plugin: plugins/lint/run_lint.py, timeout_s: 60}
+perf_summary: {enabled: true}
 
 measurement:
   cores: "0,2,4,6"             # taskset -c (P-core 4개, SMT 형제 제외)

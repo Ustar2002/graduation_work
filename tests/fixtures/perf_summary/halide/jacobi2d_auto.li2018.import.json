@@ -1,0 +1,23 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "H": 4096,
+    "W": 4096,
+    "T": 4
+  },
+  "inspect": {
+    "loop_nest": "produce repeat_edge:\n  parallel _0.v29.v29.v29:\n    for _0.v29.v29.v31 in [0, 65919]:\n      vectorized _0.v30 in [0, 7]:\n        repeat_edge(...) = ...\nconsume repeat_edge:\n  produce step0:\n    parallel x.v26.v26.v26:\n      for x.v26.v26.v28 in [0, 65631]:\n        vectorized x.v27 in [0, 7]:\n          step0(...) = ...\n  consume step0:\n    produce step1:\n      parallel x.v23.v23.v23:\n        for x.v23.v23.v25 in [0, 65599]:\n          vectorized x.v24 in [0, 7]:\n            step1(...) = ...\n    consume step1:\n      produce step2:\n        parallel x.v20.v20.v20:\n          for x.v20.v20.v22 in [0, 65567]:\n            vectorized x.v21 in [0, 7]:\n              step2(...) = ...\n      consume step2:\n        produce step3:\n          parallel x.v17.v17.v17:\n            for x.v17.v17.v19 in [0, 65663]:\n              vectorized x.v18 in [0, 7]:\n                step3(...) = ...\n",
+    "schedule_source": "step3.compute_root()\n    .split(x,v17,v18,8,ShiftInwards)\n    .fuse(v17,y,v17)\n    .reorder(v18,v17)\n    .parallel(v17,65664,ShiftInwards)\n    .vectorize(v18)\n;\nstep2.compute_root()\n    .split(x,v20,v21,8,ShiftInwards)\n    .fuse(v20,y,v20)\n    .reorder(v21,v20)\n    .parallel(v20,65568,ShiftInwards)\n    .vectorize(v21)\n;\nstep1.compute_root()\n    .split(x,v23,v24,8,ShiftInwards)\n    .fuse(v23,y,v23)\n    .reorder(v24,v23)\n    .parallel(v23,65600,ShiftInwards)\n    .vectorize(v24)\n;\nstep0.compute_root()\n    .split(x,v26,v27,8,ShiftInwards)\n    .fuse(v26,y,v26)\n    .reorder(v27,v26)\n    .parallel(v26,65632,ShiftInwards)\n    .vectorize(v27)\n;\nrepeat_edge.compute_root()\n    .split(_0,v29,v30,8,ShiftInwards)\n    .fuse(v29,_1,v29)\n    .reorder(v30,v29)\n    .parallel(v29,65920,ShiftInwards)\n    .vectorize(v30)\n;\n",
+    "autoscheduler": "Li2018",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 1.11,
+    "jit_ms": 679.02,
+    "dims": {
+      "H": 4096,
+      "W": 4096,
+      "T": 4
+    },
+    "ignored_schedule_calls": []
+  }
+}

@@ -3,10 +3,10 @@ task: nbody
 function: nbody
 params: [pos, mass, acc, n]
 args:
-  - {name: pos,  kind: in,  dtype: float32, shape: [n, 3]}
-  - {name: mass, kind: in,  dtype: float32, shape: [n]}
-  - {name: acc,  kind: out, dtype: float32, shape: [n, 3]}
-  - {name: n, kind: dim}
+  - {name: pos,  kind: in,  dtype: float32, shape: [n, 3], doc: "row i holds the coordinates of body i and column c is coordinate c, where c = 0, 1, 2 stands for x, y, z: the three coordinates of body 0, then those of body 1, and so on"}
+  - {name: mass, kind: in,  dtype: float32, shape: [n], doc: "mass[i] is the mass of body i"}
+  - {name: acc,  kind: out, dtype: float32, shape: [n, 3], doc: "row i is the acceleration of body i and column c is its component c, where c = 0, 1, 2 stands for x, y, z; the same layout as `pos`"}
+  - {name: n, kind: dim, doc: "the number of bodies, always consistent with the array shapes above"}
 work: "20*n*n"                 # 쌍마다 약 20 flop (차 3, 제곱합 5, 역제곱근·세제곱 4, 질량 곱 1, 누적 6, +EPS2 1)
 baseline: {backend: c, file: baseline/baseline.c, openmp: true}
 languages:

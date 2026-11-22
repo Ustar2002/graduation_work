@@ -4,10 +4,10 @@ task: histogram
 function: histogram
 params: [data, hist, n, nbins]
 args:
-  - {name: data, kind: in,  dtype: int32, shape: [n]}
-  - {name: hist, kind: out, dtype: int32, shape: [nbins]}
-  - {name: n, kind: dim}
-  - {name: nbins, kind: dim}
+  - {name: data, kind: in,  dtype: int32, shape: [n], doc: "every value satisfies 0 <= data[i] < nbins"}
+  - {name: hist, kind: out, dtype: int32, shape: [nbins], doc: "every element must be set, including bins whose count is 0; the initial contents of the output buffer are arbitrary"}
+  - {name: n, kind: dim, doc: "the number of data values, always equal to the length of `data`"}
+  - {name: nbins, kind: dim, doc: "the number of bins, always equal to the length of `hist`"}
 baseline: {backend: c, file: baseline/baseline.c, openmp: true}
 languages:
   numpy:

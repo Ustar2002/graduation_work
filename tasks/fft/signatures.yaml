@@ -4,9 +4,9 @@ task: fft
 function: fft
 params: [x, out, n]
 args:
-  - {name: x,   kind: in,  dtype: float32, shape: [n, 2]}
-  - {name: out, kind: out, dtype: float32, shape: [n, 2]}
-  - {name: n, kind: dim}
+  - {name: x,   kind: in,  dtype: float32, shape: [n, 2], doc: "row j holds complex input element j: column 0 is its real part and column 1 its imaginary part"}
+  - {name: out, kind: out, dtype: float32, shape: [n, 2], doc: "row k holds complex output element k: column 0 is its real part and column 1 its imaginary part"}
+  - {name: n, kind: dim, doc: "the transform length (the number of complex elements), a power of two, always equal to the first dimension of the arrays above"}
 work: "5*n*log2(n)"            # radix-2 복소 FFT 의 관용적 flop 수(버터플라이당 복소 곱 1 + 덧셈 2 = 10 flop × (n/2)·log2 n)
 baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: false, gate_min_gflops: false}
 languages:

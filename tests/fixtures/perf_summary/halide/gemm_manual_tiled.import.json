@@ -1,0 +1,17 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "M": 1024,
+    "N": 1024,
+    "K": 1024
+  },
+  "inspect": {
+    "loop_nest": "produce C:\n  for i:\n    for j:\n      C(...) = ...\n  parallel i.io:\n    for j.jo:\n      for i.ii in [0, 31]:\n        for k in [0, 1023]:\n          for j.ji.ji in [0, 7]:\n            vectorized j.ji.v8 in [0, 7]:\n              C(...) = ...\n",
+    "schedule_source": "",
+    "autoscheduler": null,
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": null,
+    "jit_ms": 298.638
+  }
+}

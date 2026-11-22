@@ -1,0 +1,25 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "n": 33554432
+  },
+  "inspect": {
+    "loop_nest": "produce acc_intm:\n  parallel v85.v93.v93 in [0, 32]:\n    for v85.v93.v95 in [0, 44]:\n      vectorized v85.v94 in [0, 3]:\n        acc_intm(...) = ...\n  parallel v85.v96.v96 in [0, 32]:\n    for v85.v96.v99 in [0, 44]:\n      vectorized v85.v97 in [0, 3]:\n        for r611 in [0, 5799]:\n          acc_intm(...) = ...\nconsume acc_intm:\n  produce acc:\n    acc(...) = ...\n    parallel r610.r637.r637 in [0, 32]:\n      for r610.r637.r639 in [0, 44]:\n        vectorized r610.r638 in [0, 3]:\n          acc(...) = ...\n  consume acc:\n    produce out:\n      parallel i:\n        out(...) = ...\n",
+    "schedule_source": "out$1.compute_root()\n    .parallel(i)\n;\nacc.compute_root()\n;\nacc.update(0)\n    .split(r$x,r610,r611,5800,GuardWithIf)\n;\nacc_intm = acc.update(0)\n    .rfactor({{r610,v85}})\n    .compute_root()\n    .split(v85,v93,v94,4,ShiftInwards)\n    .reorder(v94,v93)\n    .parallel(v93,45,ShiftInwards)\n    .vectorize(v94)\n;\nacc_intm.update()\n    .split(v85,v96,v97,4,GuardWithIf)\n    .reorder(r611,v97,v96)\n    .parallel(v96,45,GuardWithIf)\n    .vectorize(v97)\nacc.update(0)\n    .split(r610,r637,r638,4,GuardWithIf)\n    .reorder(r638,r637)\n    .atomic()\n    .parallel(r637,45,GuardWithIf)\n    .atomic()\n    .vectorize(r638)\n;\n",
+    "autoscheduler": "Li2018",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 0.619,
+    "jit_ms": 85.291,
+    "dims": {
+      "n": 33554432
+    },
+    "ignored_schedule_calls": [
+      "Stage.split",
+      "Stage.rfactor",
+      "Stage.rfactor->compute_root",
+      "Stage.rfactor->update",
+      "Stage.rfactor->parallel"
+    ]
+  }
+}

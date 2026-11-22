@@ -4,9 +4,9 @@ task: floyd_warshall
 function: floyd_warshall
 params: [dist_in, dist_out, n]
 args:
-  - {name: dist_in,  kind: in,  dtype: float32, shape: [n, n]}
-  - {name: dist_out, kind: out, dtype: float32, shape: [n, n]}
-  - {name: n, kind: dim}
+  - {name: dist_in,  kind: in,  dtype: float32, shape: [n, n], doc: "the element in row i and column j is the weight of the edge from vertex i to vertex j, or INF = 1.0e30 when there is no such edge; the diagonal is 0"}
+  - {name: dist_out, kind: out, dtype: float32, shape: [n, n], doc: "the element in row i and column j is the length of a shortest path from vertex i to vertex j"}
+  - {name: n, kind: dim, doc: "the number of vertices, always equal to both dimensions of the arrays above"}
 work: "2*n*n*n"
 baseline: {backend: c, file: baseline/baseline.c, openmp: true}
 languages:

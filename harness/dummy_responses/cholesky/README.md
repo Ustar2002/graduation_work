@@ -1,13 +1,24 @@
 # cholesky 더미 응답 (docs/harness_design.md §18)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다. `<language>/<k>.md` 가
-`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(세 언어 모두 정답 1개씩). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
+`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(일곱 언어 모두 정답 1개씩). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
 
 | language | k | 내용 | 기대 (error_stage / error_type / error_detail) | pass |
 |---|---|---|---|---|
 | numpy | 0 | `L[...] = np.linalg.cholesky(A)` (float32 LAPACK potrf; 반환 L 의 상삼각이 0 이라 한 번의 대입으로 전체 기록) — 기준선 `tasks/cholesky/baseline/baseline.py` 와 같은 코드 | 없음 — bench 까지 정상, `speedup_vs_baseline` ≈ 1 | 1 |
 | c_seq | 0 | 행 단위 Cholesky–Banachiewicz(i, j ≤ i, k < j 3중 루프), 내적을 double 로 누적, `sqrt`/나눗셈도 double, 행마다 엄격 상삼각을 0 으로 기록 | 없음 | 1 |
 | c_openmp | 0 | 오른쪽 보기(right-looking, 외적) Cholesky: A 의 하삼각을 L 에 복사·상삼각 0(행 병렬) → 열 k 마다 피벗 열을 스케일해 연속 스크래치 `col[]` 에 두고, 후행 갱신 `L[i][j] -= col[i]·col[j]` 를 **행 i 에 대해 `#pragma omp parallel for schedule(dynamic, 16)`**(내부 j 루프가 행 방향 연속이라 벡터화됨) | 없음, `speedup_vs_baseline` ≈ 1.3 | 1 |
+
+### 새 언어 (numba · halide_auto · halide_manual · rust)
+
+모두 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미"). 넷 다 엄격 상삼각을 0 으로 쓴다.
+
+| language | 내용 |
+|---|---|
+| numba | 왼쪽 보기(left-looking, Crout) 열 루프, 내적은 float64. 엄격 상삼각은 먼저 행 `prange` 로 0. 열 j 마다 대각 아래 행을 `prange(j+1, n)` 로 나눠 각 반복이 `L[i, j]` 만 쓴다. `@njit("void(float32[:, ::1], float32[:, ::1], int64)", parallel=True)` |
+| halide_auto | 알고리즘만: 정규화 전 인자 `S` 를 `where`(k < j, i ≥ j) 가 붙은 RDom (k, i, j) 갱신 하나로 계산한 뒤 `L = select(c <= r, S[c,r]/sqrt(S[c,c]), 0)` 이 n² 원소 전부를 쓴다. 스케줄 호출 없음(RDom 갱신의 병렬화는 오토스케줄러 몫인데 Li2018 은 순차로 둔다) |
+| halide_manual | 같은 알고리즘 + `S.compute_root().vectorize(c, 8, GuardWithIf).parallel(r)`, `S.update(0).allow_race_conditions().parallel(rd.y)`(한 열 안의 행은 서로 독립), `L.vectorize(c, 8).parallel(r)` |
+| rust | 왼쪽 보기 열 루프, f64 내적(고정 순서 8 레인), 상삼각은 `par_chunks_mut` 로 0. 열마다 `split_at_mut` 로 j 아래 행을 떼어 rayon `par_chunks_mut(n)` 로 병렬 갱신(작업마다 자기 행만 쓴다) |
 
 ## 변형별 주의
 

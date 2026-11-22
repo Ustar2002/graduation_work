@@ -1,13 +1,24 @@
 # nbody 더미 응답 (docs/harness_design.md §17)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다. `<language>/<k>.md` 가
-`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(세 언어 모두 정답 1개씩). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
+`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(일곱 언어 모두 정답 1개씩). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
 
 | language | k | 내용 | 기대 (error_stage / error_type / error_detail) | pass |
 |---|---|---|---|---|
 | numpy | 0 | float64 로 변환해 256행씩 `(chunk, n, 3)` 브로드캐스트로 모든 쌍을 직접 합산, 블록마다 `acc[i0:i1] = …` (참조 구현 `tasks/nbody/gen_tests.py` 와 같은 식) | 없음 — bench 까지 정상 (max_tol_ratio ≈ float32 반올림 수준) | 1 |
 | c_seq | 0 | i·j 2중 루프, `r2 = dx²+dy²+dz²+1e-4f`, `inv_r = 1.0f/sqrtf(r2)`, `w = mass[j]·inv_r³`, AoS 그대로 | 없음 | 1 |
 | c_openmp | 0 | 위 c_seq 커널에 `#pragma omp parallel for schedule(static)` (i 병렬) — 기준선 `tasks/nbody/baseline/baseline.c` 와 같은 코드 | 없음, `speedup_vs_baseline` ≈ 1 | 1 |
+
+### 새 언어 (numba · halide_auto · halide_manual · rust)
+
+모두 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미"). 넷 다 출력 행을 대입하고 `+=` 로 쌓지 않는다.
+
+| language | 내용 |
+|---|---|
+| numba | pos 를 float32 SoA 배열(px·py·pz)로 복사한 뒤 i 마다 j 에 대해 float32 직접 합산. `@njit("void(float32[:, ::1], float32[::1], float32[:, ::1], int64)", parallel=True, fastmath=True)`, i 를 `prange` (fastmath 로 j 루프가 벡터화되고 근사 rsqrt 를 쓸 수 있다 — rtol 1e-3 안) |
+| halide_auto | 알고리즘만: RDom j ∈ [0, n), `s[i, d] = 0` 과 갱신 `s[i, d] += w · (pos[d, j] − pos[d, i])`, `w = m_j / (r2 · sqrt(r2))`, 출력 `acc[d, i] = s[i, d]`. 스케줄 호출 없음 |
+| halide_manual | 같은 알고리즘 + `s.compute_root()`, `s.update(0)` 을 i 에 대해 8로 split(`GuardWithIf`), (j 안쪽, ii, d, io) 순서로 reorder, `vectorize(ii)`·`parallel(io)` |
+| rust | 위치의 SoA 사본을 만든 뒤 `acc.par_chunks_mut(3).enumerate()`(rayon; 출력 행마다 작업 하나). 안쪽 루프는 px·py·pz·mass 의 `chunks_exact(8)` 블록과 좌표마다 누산기 8개, 나머지는 스칼라 꼬리 루프 |
 
 ## 변형별 주의
 

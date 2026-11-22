@@ -1,13 +1,24 @@
 # fft 더미 응답 (docs/harness_design.md §18)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다. `<language>/<k>.md` 가
-`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(세 언어 모두 정답 1개씩). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
+`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(일곱 언어 모두 정답 1개씩). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
 
 | language | k | 내용 | 기대 (error_stage / error_type / error_detail) | pass |
 |---|---|---|---|---|
 | numpy | 0 | (n, 2) float32 버퍼를 `reshape(-1).view(np.complex64)` 로 보고 `np.fft.fft` 결과를 out 의 complex64 뷰에 대입 (기준선 `tasks/fft/baseline/baseline.py` 와 같은 코드) | 없음 — bench 까지 정상, `speedup_vs_baseline` ≈ 1 | 1 |
 | c_seq | 0 | 반복(iterative) radix-2 DIT: 비트 반전 복사 → log2 n 단계 제자리 버터플라이. 데이터 float32, 단계마다 트위들 테이블을 double `cos`/`sin` 으로 계산, 버터플라이 산술은 double 로 하고 float32 로 반올림 | 없음 | 1 |
 | c_openmp | 0 | 위 c_seq 커널의 비트 반전 루프·트위들 루프·버터플라이 루프(`collapse(2)`)에 `#pragma omp parallel for` | 없음, large 에서 c_seq 의 약 2배 | 1 |
+
+### 새 언어 (numba · halide_auto · halide_manual · rust)
+
+모두 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미"). 입력·출력은 (n, 2) float32(실수·허수)이고 트위들은 배정밀도로 계산한다.
+
+| language | 내용 |
+|---|---|
+| numba | `@njit("void(float32[:, ::1], float32[:, ::1], int64)", parallel=True)`: complex128 작업 배열에서 반복 radix-2 Cooley–Tukey — 배정밀도 트위들 테이블, 비트 반전 순열, log2 n 단계 버터플라이. 트위들·순열·단계마다 n/2 버터플라이·마지막 float32 저장을 `prange` |
+| halide_auto | 알고리즘만: radix-2 Stockham 변환 — log2 n 개의 out-of-place 단계가 각각 (re, im) Tuple 의 Func, 트위들 Func 는 f64 로 계산해 f32 로 반올림, 출력은 자연 순서(비트 반전 단계 없음), `out[c, k] = select(c == 0, re, im)`. 스케줄 호출 없음 |
+| halide_manual | 같은 알고리즘 + 트위들과 모든 단계를 `compute_root()`, `vectorize(o, 8)` 와 4096 원소 블록 `parallel`(꼬리는 `GuardWithIf`), 출력은 `out.bound(c, 0, 2).unroll(c).vectorize(k, 8, g).parallel(k, 4096 // 8, g)` |
+| rust | f64 radix-2 Cooley–Tukey: 입력을 `reverse_bits` 순서로 모으고 트위들 테이블을 `cos`/`sin` 으로. 단계마다 블록이 작으면(half ≤ 4096) 블록 단위, 크면 각 블록의 두 반쪽을 묶은 rayon `par_chunks_mut`, 마지막 저장도 `par_chunks_mut(2)` |
 
 ## 변형별 주의
 

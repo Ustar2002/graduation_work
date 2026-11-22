@@ -1,0 +1,12 @@
+kernel.c:17:21: runtime error: shift exponent 40 is too large for 32-bit type 'int'
+    #0 0x7f4c19a0e2c7 in cholesky kernel.c:17
+    #1 0x7f4c1ae1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:22:30: runtime error: division by zero
+    #0 0x7f4c19a0e35e in cholesky kernel.c:22
+    #1 0x7f4c1ae1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:17:21: runtime error: shift exponent 41 is too large for 32-bit type 'int'
+    #0 0x7f4c19a0e2c7 in cholesky kernel.c:17
+    #1 0x7f4c1ae1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+

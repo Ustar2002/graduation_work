@@ -1,0 +1,29 @@
+kernel.c:10:15: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'
+    #0 0x7f8d2c40e2b4 in scan kernel.c:10
+    #1 0x7f8d2d81bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f8d2d81840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f8d2d81b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #4 0x7f8d2d84d2c8 in _ctypes_callproc (/usr/lib/python3.14/lib-dynload/_ctypes.cpython-314-x86_64-linux-gnu.so+0x152c8) (BuildId: 9c1f0e6b7a8d4c35b2a1908f7e6d5c4b3a291807)
+    #5 0x5a3d6c1e4a2c in _PyObject_MakeTpCall (/usr/bin/python3.14+0x1e4a2c) (BuildId: 4b7e1d9a0c3f5e6872a1b0c9d8e7f6a5b4c3d2e1)
+    #6 0x7f8d2e22a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #7 0x7f8d2e22a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #8 0x5a3d6c3e8964 in _start (/usr/bin/python3.14+0x3e8964) (BuildId: 4b7e1d9a0c3f5e6872a1b0c9d8e7f6a5b4c3d2e1)
+
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior kernel.c:10:15
+kernel.c:14:9: runtime error: index 8 out of bounds for type 'float [8]'
+    #0 0x7f8d2c40e3f1 in scan kernel.c:14
+    #1 0x7f8d2d81bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f8d2d81840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f8d2d81b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior kernel.c:14:9
+kernel.c:21:22: runtime error: load of misaligned address 0x7c5e2a1e0041 for type 'const float', which requires 4 byte alignment
+0x7c5e2a1e0041: note: pointer points here
+ 00 00 00  00 00 80 3f 00 00 00 40  00 00 40 40 00 00 80 40  00 00 a0 40 00 00 c0 40  00 00 e0 40 00
+              ^
+    #0 0x7f8d2c40e5c8 in scan kernel.c:21
+    #1 0x7f8d2d81bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f8d2d81840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f8d2d81b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior kernel.c:21:22

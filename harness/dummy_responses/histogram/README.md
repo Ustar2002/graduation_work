@@ -1,7 +1,7 @@
 # histogram 더미 응답 (docs/harness_design.md §13·§17)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다. `<language>/<k>.md` 가
-`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(numpy·c_seq 는 1개, c_openmp 는 2개). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
+`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(c_openmp 는 2개, 그 밖의 언어는 1개). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
 
 | language | k | 내용 | 기대 (error_stage / error_type / error_detail) | pass |
 |---|---|---|---|---|
@@ -9,6 +9,17 @@
 | c_seq | 0 | `memset` 으로 0 초기화 뒤 `hist[data[i]]++` | 없음 | 1 |
 | c_openmp | 0 | 스레드별 private 히스토그램(`calloc` 한 스크래치의 슬라이스) → 빈 루프를 나눠 합산 | 없음 | 1 |
 | c_openmp | 1 | 0 초기화 뒤 보호 없는 `#pragma omp parallel for` 로 공유 `hist[data[i]]++` (race) | check / race_condition / `nondeterministic:rect,small` (tiny 는 아래 주의) | 0 |
+
+### 새 언어 (numba · halide_auto · halide_manual · rust)
+
+모두 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미"). 넷 다 모든 빈을 덮어쓰므로 센티널이 남지 않는다.
+
+| language | 내용 |
+|---|---|
+| numba | `prange` 반복마다 `data` 의 연속 청크 하나를 `(nchunks, nbins)` int32 스크래치의 자기 행에 세고, 두 번째 `prange`(빈 단위)가 행들을 합쳐 `hist[b]` 를 덮어쓴다(numba 에는 원자 증가가 없다) |
+| halide_auto | 알고리즘만: 최대 64 청크의 부분 히스토그램 `partial[b, c]` 를 RDom 산포로 세고(빈 번호는 `unsafe_promise_clamped`, 꼬리는 `select` 로 가림) `hist[b] = 0; hist[b] += partial[b, rc.x]`. 스케줄 호출 없음 |
+| halide_manual | 같은 알고리즘 + `partial.compute_root()`, `partial.update(0).parallel(c)`(청크 행마다 스레드 하나), 청크 합산은 `reorder(b, rc.x).vectorize(b, 8, GuardWithIf)` |
+| rust | rayon `par_chunks` 로 청크마다 비공개 `Vec<u32>` 에 세고 `reduce` 로 빈별 합산, 마지막 루프가 모든 `hist[b]` 를 덮어쓴다(크기 계산은 `usize`) |
 
 ## 변형별 주의
 

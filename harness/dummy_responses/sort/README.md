@@ -1,13 +1,23 @@
 # sort 더미 응답 (docs/harness_design.md §17)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다. `<language>/<k>.md` 가
-`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(세 언어 모두 정답 1개씩). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
+`sample_idx mod 파일 수` 번째 샘플의 응답이 된다(numpy·c_seq·c_openmp·numba·rust 모두 정답 1개씩; Halide 는 아래). 각 파일은 짧은 설명 + 펜스 코드 블록 하나다.
 
 | language | k | 내용 | 기대 (error_stage / error_type / error_detail) | pass |
 |---|---|---|---|---|
 | numpy | 0 | `out[...] = np.sort(x)` — 기준선 `tasks/sort/baseline/baseline.py` 와 같은 코드(단일 스레드) | 없음 — bench 까지 정상, `speedup_vs_baseline` ≈ 1 | 1 |
 | c_seq | 0 | `memcpy(out, x)` 뒤 `qsort`(비교자 `(x > y) - (x < y)` — `a - b` 오버플로 없음) | 없음 (large 10⁷ 에 호출당 약 1.3 s, 1스레드) | 1 |
 | c_openmp | 0 | 8비트 × 4패스 병렬 LSD 기수 정렬: 스레드별 연속 청크의 digit 히스토그램 → `single` 에서 bucket·thread 순 쓰기 오프셋 → 안정 분산; 키는 부호 비트를 뒤집어 unsigned 순서 = signed 순서, 마지막 패스에서 되돌려 `out` 에 착지 | 없음, `speedup_vs_baseline` > 1 (병렬 정렬이 단일 스레드 `np.sort` 보다 빠른 것은 정상) | 1 |
+
+### 새 언어 (numba · rust; Halide 는 지원하지 않음)
+
+`sort` 는 `halide_auto`·`halide_manual` 을 지원하지 않는다(`tasks/sort/signatures.yaml` 의 `unsupported`: 데이터 의존 제어 흐름은 Halide 파이프라인으로 표현할 수 없다). 그래서 그 두 디렉터리가 없고, `harness.generate` 는 건너뛰며 `tools/devcheck.py dummies` 는 `unsupported`, `analysis.aggregate --coverage` 는 `n/a` 로 낸다.
+나머지 둘은 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미"). 둘 다 `x` 를 제자리 정렬하지 않는다.
+
+| language | 내용 |
+|---|---|
+| numba | `@njit("void(int32[::1], int32[::1], int64)", parallel=True)`: `x` 를 `out` 으로 `prange` 복사 → 스레드마다 연속 구간 하나를 `out[lo:hi].sort()`(`prange`) → 이웃 구간을 짝지어 병렬 병합(`prange`, `out` 과 임시 버퍼 사이를 오가며 마지막이 임시 버퍼면 되돌려 복사) |
+| rust | `out.copy_from_slice(x)` 뒤 `out.par_sort_unstable()`(rayon 병렬 정렬). `x` 는 `from_raw_parts` 로만 감싼다(읽기 전용) |
 
 ## 변형별 주의
 

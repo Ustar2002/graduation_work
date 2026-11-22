@@ -1,21 +1,25 @@
 """LLM 호출 클라이언트 (설계 §5). 제공자: anthropic(스트리밍) · openai_compat · dummy.
 
 - ``LLMResponse`` 는 한 번의 호출 결과(텍스트·토큰·지연·중단 사유·오류)를 담는다.
-- ``complete()`` 는 어떤 경우에도 예외를 던지지 않고 ``error`` 필드로 보고한다
+- ``complete()`` 는 호출이 어떻게 실패하든 예외를 던지지 않고 ``error`` 필드로 보고한다
   (``fatal:<Type>:<status>:<msg>`` 는 generate 가 즉시 중단, ``transient:...`` 는 다음 실행에서 재호출).
-  ``preflight()`` 만 예외를 던진다.
+  ``preflight()`` 만 예외를 던진다(형태가 틀린 ``messages`` 는 호출 전의 ``ValueError`` — 하네스의 버그다).
 - 스트림 도중 SSE ``event: error`` 로 오는 오류(응답은 이미 HTTP 200 으로 시작됨; SDK ``max_retries`` 미적용)는 SDK 가
   평범한 ``APIStatusError(status_code=200)`` 로 던지므로 HTTP 상태가 아니라 body 의 ``error.type`` 으로 분류한다
   (``overloaded_error``/``api_error``/``rate_limit_error``/``timeout_error`` → transient, 인증·권한·요청 오류 → fatal).
 - SDK 는 지연 임포트한다(anthropic 2.x: ``messages.stream`` 에 ``temperature`` 키워드가 없어 ``extra_body`` 로만 보낸다;
   ``request_id`` 는 ``with client.messages.stream(...) as stream`` 의 stream 객체(MessageStream)에 있고,
   ``usage.output_tokens_details.thinking_tokens`` · ``msg.stop_details.category`` 는 설치된 2.4.0 소스로 확인했다).
+- 수정 루프(설계 v3 §10): ``complete(..., messages=[...])`` 는 user/assistant 가 번갈아 나오는 대화를 그대로 보낸다
+  (이전 응답은 텍스트만 — thinking 블록은 다시 보내지 않는다). dummy 는 ``dummy_key`` 의 턴이 1 이상이면 ``<k>.turn<t>.md`` 를
+  찾고, 없으면 ``<k>.md`` 를 다시 준다(같은 실패가 반복된다).
 - 개발 중 네트워크 호출 금지: ``--info`` 는 클라이언트만 만들고 요청을 보내지 않는다.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
@@ -25,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.config import Config, ConfigError, load_config
-from harness.paths import ROOT
+from harness.paths import ROOT, rel_to_root
 
 _LOG = "[llm_client]"
 
@@ -40,6 +44,9 @@ _OPENAI_STOP_MAP = {"stop": "end_turn", "length": "max_tokens", "content_filter"
 # APIStatusError — 스트림 도중 SSE ``event: error`` (응답 상태 200) — 에만 쓴다. 아래 타입은 fatal, 그 외(``overloaded_error``,
 # ``api_error``, ``rate_limit_error``, ``timeout_error``, 모르는 타입)는 서버 쪽 중단으로 보고 transient.
 _FATAL_ERROR_TYPES = frozenset({"invalid_request_error", "authentication_error", "permission_error", "not_found_error", "billing_error"})
+
+# 대화(``complete`` 의 ``messages``)는 user 로 시작해 user/assistant 가 번갈아 나오고 user 로 끝난다
+MESSAGE_ROLES: tuple[str, ...] = ("user", "assistant")
 
 
 class LLMClientError(RuntimeError):
@@ -90,6 +97,36 @@ def _error_body_type(e: BaseException) -> str | None:
     return None
 
 
+def conversation(user: str, messages: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    """보낼 대화: ``messages`` 가 없으면 ``user`` 한 턴, 있으면 그 사본(``role``·``content`` 만; ``user`` 는 쓰지 않는다).
+
+    ``messages`` 는 user 로 시작해 user/assistant 가 번갈아 나오고 user 로 끝나야 하며, 내용은 공백만이 아닌 문자열이어야 한다
+    (Messages API 는 빈 내용을 400 으로 거부한다). 아니면 ``ValueError`` — 대화를 조립한 쪽(하네스)의 버그이므로 API 오류로
+    기록하지 않는다(assistant 로 끝나는 대화를 보내면 모델이 그 응답을 이어 쓴다).
+    """
+    if messages is None:
+        return [{"role": "user", "content": user}]
+    if len(messages) % 2 != 1:
+        raise ValueError(f"messages 는 user 로 시작해 user 로 끝나야 한다 (현재 {len(messages)}개)")
+    turns: list[dict[str, str]] = []
+    for i, message in enumerate(messages):
+        role, content = message.get("role"), message.get("content")
+        if role != MESSAGE_ROLES[i % 2] or not isinstance(content, str):
+            raise ValueError(f"messages[{i}]: role 은 {MESSAGE_ROLES[i % 2]!r}, content 는 문자열이어야 한다 (현재 role={role!r})")
+        if not content.strip():
+            raise ValueError(f"messages[{i}]: {role} 의 content 가 비어 있다(공백만) — API 가 거부하는 대화다")
+        turns.append({"role": role, "content": content})
+    return turns
+
+
+def _import_sdk(name: str) -> Any:
+    """제공자의 SDK 모듈(지연 임포트). 설치돼 있지 않으면 ``LLMClientError`` — 호출 오류가 아니라 구성 오류다."""
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as e:
+        raise LLMClientError(f"{name} SDK 를 임포트할 수 없다 ({e}); requirements.txt 를 설치하라") from None
+
+
 def _model_dump(obj: Any) -> dict[str, Any]:
     """pydantic 객체를 JSON 가능한 dict 로(실패하면 {})."""
     if obj is None:
@@ -128,8 +165,7 @@ class LLMClient:
     # ------------------------------------------------------------------ 초기화
 
     def _init_anthropic(self) -> None:
-        import anthropic
-
+        anthropic = _import_sdk("anthropic")
         m = self.cfg.model
         kwargs: dict[str, Any] = {"timeout": float(m.request_timeout_s), "max_retries": int(m.max_retries)}
         key_env = m.anthropic.api_key_env
@@ -157,8 +193,7 @@ class LLMClient:
             print(f"{_LOG} 경고: Anthropic 자격증명을 찾지 못했다 ({ANTHROPIC_DEFAULT_KEY_ENV}/ANTHROPIC_AUTH_TOKEN/프로필). preflight 가 실패할 것이다.", file=sys.stderr)
 
     def _init_openai_compat(self) -> None:
-        import openai
-
+        openai = _import_sdk("openai")
         m = self.cfg.model
         base_url = os.environ.get(m.openai_compat.base_url_env)
         if not base_url:
@@ -195,15 +230,23 @@ class LLMClient:
         served = getattr(info, "id", None)
         print(f"{_LOG} preflight ok: {self.provider} model={self.model} (id={served}) base_url={self.base_url}", file=sys.stderr)
 
-    def complete(self, system: str, user: str, *, dummy_key: tuple[str, str, int] | None = None) -> LLMResponse:
-        """시스템·사용자 프롬프트로 한 번 호출한다. 예외는 던지지 않고 ``error`` 로 보고한다."""
+    def complete(self, system: str, user: str, *, messages: list[dict[str, str]] | None = None,
+                 dummy_key: tuple[Any, ...] | None = None) -> LLMResponse:
+        """한 번 호출한다. 호출의 실패는 예외로 던지지 않고 ``error`` 로 보고한다.
+
+        - ``messages`` 가 없으면 ``user`` 한 턴을 보낸다. 있으면(수정 루프) 그 대화를 보내고 ``user`` 는 쓰지 않는다
+          (``conversation``; 대화의 형태가 틀리면 ``ValueError``).
+        - ``dummy_key``: dummy 제공자가 응답 파일을 고르는 열쇠 — ``(task, language, sample_idx)`` 또는
+          ``(task, language, sample_idx, turn)``.
+        """
+        turns = conversation(user, messages)
         if self.provider == "dummy":
-            return self._complete_dummy(system, user, dummy_key)
+            return self._complete_dummy(system, turns, dummy_key)
         t0 = time.perf_counter()
         try:
             if self.provider == "anthropic":
-                return self._complete_anthropic(system, user, t0)
-            return self._complete_openai_compat(system, user, t0)
+                return self._complete_anthropic(system, turns, t0)
+            return self._complete_openai_compat(system, turns, t0)
         except Exception as e:  # noqa: BLE001 — 설계: 호출자에게 던지지 않는다
             latency_ms = (time.perf_counter() - t0) * 1000.0
             error = self._classify_error(e)
@@ -212,7 +255,7 @@ class LLMClient:
 
     # ------------------------------------------------------------------ 제공자별 구현
 
-    def _complete_anthropic(self, system: str, user: str, t0: float) -> LLMResponse:
+    def _complete_anthropic(self, system: str, turns: list[dict[str, str]], t0: float) -> LLMResponse:
         m = self.cfg.model
         extra: dict[str, Any] = {}
         if m.temperature is not None:
@@ -223,7 +266,7 @@ class LLMClient:
             model=self.model,
             max_tokens=int(m.max_tokens),
             system=system,
-            messages=[{"role": "user", "content": user}],
+            messages=turns,
             thinking={"type": m.anthropic.thinking},
             output_config={"effort": m.anthropic.effort},
             **extra,
@@ -280,11 +323,11 @@ class LLMClient:
             error=None,
         )
 
-    def _complete_openai_compat(self, system: str, user: str, t0: float) -> LLMResponse:
+    def _complete_openai_compat(self, system: str, turns: list[dict[str, str]], t0: float) -> LLMResponse:
         m = self.cfg.model
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "messages": [{"role": "system", "content": system}, *turns],
             m.openai_compat.max_tokens_param: int(m.max_tokens),
         }
         if m.temperature is not None:
@@ -330,21 +373,28 @@ class LLMClient:
             error=None,
         )
 
-    def _complete_dummy(self, system: str, user: str, dummy_key: tuple[str, str, int] | None) -> LLMResponse:
-        """``harness/dummy_responses/<task>/<language>/<k>.md`` (k = sample_idx mod 파일 수)를 응답으로 돌려준다."""
-        if dummy_key is None:
-            return self._error_response("fatal:DummyKeyMissing::dummy provider 는 dummy_key=(task, language, sample_idx) 가 필요하다", 0.0)
-        task, language, sample_idx = dummy_key
+    def _complete_dummy(self, system: str, turns: list[dict[str, str]], dummy_key: tuple[Any, ...] | None) -> LLMResponse:
+        """``harness/dummy_responses/<task>/<language>/<k>.md`` (k = sample_idx mod ``<숫자>.md`` 파일 수)를 응답으로 돌려준다.
+        턴 t ≥ 1 이면 같은 k 의 ``<k>.turn<t>.md`` 가 있을 때 그것을, 없으면 ``<k>.md`` 를 준다."""
+        if dummy_key is None or len(dummy_key) not in (3, 4):
+            return self._error_response(
+                "fatal:DummyKeyMissing::dummy provider 는 dummy_key=(task, language, sample_idx[, turn]) 가 필요하다", 0.0)
+        task, language, sample_idx = dummy_key[:3]
+        turn = int(dummy_key[3]) if len(dummy_key) == 4 else 0
         directory = DUMMY_ROOT / str(task) / str(language)
         files = sorted((p for p in directory.glob("*.md") if p.stem.isdigit()), key=lambda p: int(p.stem))
         if not files:
             return self._error_response(f"fatal:DummyResponseMissing::{directory} 에 <k>.md 더미 응답이 없다", 0.0)
         chosen = files[int(sample_idx) % len(files)]
+        if turn >= 1:
+            repaired = chosen.with_name(f"{chosen.stem}.turn{turn}.md")
+            if repaired.is_file():
+                chosen = repaired
         try:
-            text = chosen.read_text(encoding="utf-8")
+            text = chosen.read_text(encoding="utf-8-sig")  # 편집기가 붙인 BOM 은 응답의 일부가 아니다
         except OSError as e:
             return self._error_response(f"fatal:{type(e).__name__}::{_one_line(str(e))}", 0.0)
-        tokens_in = len((system + " " + user).split())
+        tokens_in = len(" ".join([system, *(message["content"] for message in turns)]).split())
         tokens_out = len(text.split())
         return LLMResponse(
             text=text,
@@ -362,7 +412,7 @@ class LLMClient:
             n_thinking_blocks=0,
             n_text_blocks=1,
             request_id=None,
-            raw_usage={"source": str(chosen.relative_to(ROOT)), "fake_tokens": "word_count"},
+            raw_usage={"source": rel_to_root(chosen), "fake_tokens": "word_count"},
             base_url=None,
             sdk_version=None,
             api_key_present=False,
@@ -432,7 +482,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", default=None, help="model.provider 덮어쓰기 (LLM_PROVIDER)")
     parser.add_argument("--info", action="store_true", help="provider/model/base_url/sdk/api_key_present 출력 (요청 없음)")
     parser.add_argument("--preflight", action="store_true", help="models.retrieve 로 인증·모델명 확인 (네트워크 호출)")
-    parser.add_argument("--dummy", nargs=3, metavar=("TASK", "LANGUAGE", "IDX"), default=None, help="더미 응답을 LLMResponse JSON 으로 출력")
+    parser.add_argument("--dummy", nargs="+", metavar="KEY", default=None,
+                        help="더미 응답을 LLMResponse JSON 으로 출력: TASK LANGUAGE IDX [TURN]")
     ns = parser.parse_args(argv)
     if ns.provider:
         os.environ["LLM_PROVIDER"] = ns.provider
@@ -456,8 +507,10 @@ def main(argv: list[str] | None = None) -> int:
         print("preflight ok")
         did = True
     if ns.dummy is not None:
-        task, language, idx = ns.dummy
-        resp = client.complete("system", "user", dummy_key=(task, language, int(idx)))
+        if len(ns.dummy) not in (3, 4):
+            parser.error("--dummy 는 TASK LANGUAGE IDX [TURN] 이다")
+        task, language, *numbers = ns.dummy
+        resp = client.complete("system", "user", dummy_key=(task, language, *(int(n) for n in numbers)))
         print(json.dumps(asdict(resp), ensure_ascii=False, indent=2))
         did = True
     if not did:
@@ -467,4 +520,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # 더미 응답 원문·오류 메시지를 찍다가 로캘 코드페이지에서 죽지 않게 스트림을 정리한다(진입점에서만).
+    from harness.procutil import setup_stdio
+
+    setup_stdio()
     sys.exit(main())

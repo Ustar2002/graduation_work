@@ -1,0 +1,19 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "n": 33554432
+  },
+  "inspect": {
+    "loop_nest": "produce x_im:\n  parallel _0.v65.v65 in [0, 31]:\n    for _0.v65.v67 in [0, 131071]:\n      vectorized _0.v66 in [0, 7]:\n        x_im(...) = ...\nconsume x_im:\n  produce y_im:\n    parallel _0.v62.v62 in [0, 31]:\n      for _0.v62.v64 in [0, 131071]:\n        vectorized _0.v63 in [0, 7]:\n          y_im(...) = ...\n  consume y_im:\n    produce out_intm:\n      parallel v36.v45.v45 in [0, 32]:\n        for v36.v45.v47 in [0, 21]:\n          vectorized v36.v46 in [0, 7]:\n            for i:\n              out_intm(...) = ...\n      for i:\n        parallel v36.v48.v48 in [0, 32]:\n          for v36.v48.v51 in [0, 21]:\n            vectorized v36.v49 in [0, 7]:\n              for r346 in [0, 5799]:\n                out_intm(...) = ...\n    consume out_intm:\n      produce out:\n        parallel i:\n          out(...) = ...\n        parallel i:\n          parallel r345.r374.r374 in [0, 32]:\n            for r345.r374.r378 in [0, 21]:\n              vectorized r345.r375 in [0, 7]:\n                out(...) = ...\n",
+    "schedule_source": "out.compute_root()\n    .parallel(i)\n;\nout.update(0)\n    .split(r$x,r345,r346,5800,GuardWithIf)\n;\nout_intm = out.update(0)\n    .rfactor({{r345,v36}})\n    .compute_root()\n    .split(v36,v45,v46,8,ShiftInwards)\n    .reorder(v46,v45)\n    .parallel(v45,22,ShiftInwards)\n    .vectorize(v46)\n;\nout_intm.update()\n    .split(v36,v48,v49,8,GuardWithIf)\n    .reorder(r346,v49,v48)\n    .parallel(v48,22,GuardWithIf)\n    .vectorize(v49)\nout.update(0)\n    .split(r345,r374,r375,8,GuardWithIf)\n    .reorder(r375,r374,i)\n    .parallel(i)\n    .atomic()\n    .parallel(r374,22,GuardWithIf)\n    .atomic()\n    .vectorize(r375)\n;\ny_im.compute_root()\n    .split(_0,v62,v63,8,ShiftInwards)\n    .reorder(v63,v62)\n    .parallel(v62,131072,ShiftInwards)\n    .vectorize(v63)\n;\nx_im.compute_root()\n    .split(_0,v65,v66,8,ShiftInwards)\n    .reorder(v66,v65)\n    .parallel(v65,131072,ShiftInwards)\n    .vectorize(v66)\n;\n",
+    "autoscheduler": "Li2018",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 1.019,
+    "jit_ms": 126.675,
+    "dims": {
+      "n": 33554432
+    },
+    "ignored_schedule_calls": []
+  }
+}

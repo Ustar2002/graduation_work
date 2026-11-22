@@ -1,19 +1,61 @@
 # 더미 응답 (harness/dummy_responses/) — 과제 전체 기대표
 
-`provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다(설계 `docs/harness_design.md` §13·§17).
+`provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다(설계 `docs/harness_design.md` §13·§17·§18, `docs/harness_design_v3.md` §14).
 `<task>/<language>/<k>.md` 가 **`sample_idx mod 파일 수`** 번째 샘플의 응답이 되고, 각 파일은 실제 응답처럼 짧은 설명 + 펜스 코드 블록
-하나다. `make dummy`(또는 `generate --provider dummy` → `run` → `aggregate --csv results/runs_dummy.csv`)의 행이 아래 표와 같으면
+하나다. 수정 턴 t ≥ 1 의 응답은 `<k>.turn<t>.md`(없으면 `<k>.md`)이고 파일 수에 들지 않는다(`gemm/README.md`).
+`make dummy`(또는 `generate --provider dummy` → `run` → `aggregate --csv results/runs_dummy.csv`)의 행이 아래 표와 같으면
 파이프라인(extract → build → import → check → bench → 행)이 정상이다. 분류 규칙은 설계 §10 과 `docs/error_taxonomy.md`.
-더미 행은 `results/runs_dummy.csv` 에만 쌓인다(실제 결과와 섞이지 않음).
+더미 행은 `results/runs_dummy.csv` 에만 쌓인다(실제 결과와 섞이지 않음). `make dummy` 는 설정의 기본 언어(numpy·c_seq·c_openmp)만 돌리고,
+새 언어는 `make dummy-m3`(네 언어) 또는 `make dummy-all`(일곱 언어)로 돌린다. 모든 `0.md` 의 정확성 점검은 `make devcheck` 다.
 
-| task | numpy | c_seq | c_openmp | 과제별 README(실측·주의) |
-|---|---|---|---|---|
-| gemm (M1) | 0–4 | 0–2 | 0–2 | `gemm/README.md` — 11개 변형(pass·signature_mismatch·numeric_instability·timeout·wrong_output·compile_error·arg_order·runtime_crash·race_condition) |
-| jacobi2d · spmv_csr · dot (M2a, Tier 1) | 0 | 0 | 0 | 정답만(`dummy-m2`, 2026-11-05: 9행 pass) |
-| histogram (M2b, Tier 2) | 0 | 0 | 0, 1 | `histogram/README.md` |
-| scan (Tier 2) | 0 | 0 | 0, 1 | `scan/README.md` |
-| nbody (Tier 2) | 0 | 0 | 0 | `nbody/README.md` |
-| sort (Tier 2) | 0 | 0 | 0 | `sort/README.md` |
+표의 칸은 그 조합에 있는 `<k>.md` 의 k 다. `—` 는 과제가 그 언어를 지원하지 않는 조합(`tasks/<task>/signatures.yaml` 의 `unsupported`)이라 파일이 없다.
+
+| task | numpy | c_seq | c_openmp | numba | halide_auto | halide_manual | rust | 과제별 README(실측·주의) |
+|---|---|---|---|---|---|---|---|---|
+| gemm (M1) | 0–4 | 0–2 | 0–2 | 0 | 0 | 0 | 0 | `gemm/README.md` — 11개 변형(pass·signature_mismatch·numeric_instability·timeout·wrong_output·compile_error·arg_order·runtime_crash·race_condition)과 수정 턴 2개 |
+| jacobi2d · spmv_csr · dot (M2a, Tier 1) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 과제별 README 없음 — 정답만(`dummy-m2`, 2026-11-05: 기존 세 언어 9행 pass). 새 언어는 아래 "새 언어 더미" |
+| histogram (M2b, Tier 2) | 0 | 0 | 0, 1 | 0 | 0 | 0 | 0 | `histogram/README.md` |
+| scan (Tier 2) | 0 | 0 | 0, 1 | 0 | 0 | 0 | 0 | `scan/README.md` |
+| nbody (Tier 2) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `nbody/README.md` |
+| sort (Tier 2) | 0 | 0 | 0 | 0 | — | — | 0 | `sort/README.md` |
+| cholesky (M2c, Tier 3) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `cholesky/README.md` |
+| floyd_warshall (Tier 3) | 0 | 0 | 0, 1 | 0 | 0 | 0 | 0 | `floyd_warshall/README.md` — c_openmp/1 은 k 루프 병렬화(의존성 위반) |
+| bfs (Tier 3) | 0 | 0 | 0, 1 | 0 | — | — | 0 | `bfs/README.md` — c_openmp/1 은 원자 연산 없는 프론티어(race) |
+| fft (Tier 3) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `fft/README.md` |
+
+## 새 언어 더미 (numba · halide_auto · halide_manual · rust)
+
+새 언어의 더미는 과제 12개 × 언어 4개에서 Halide 의 `sort`·`bfs` 를 뺀 44개이고, 모두 정답 `0.md` 하나다.
+기대는 전부 **오류 없음 — bench 까지 정상, pass = 1** 이다. 공통 규칙:
+
+- numba: 모든 `@njit` 에 명시 시그니처 문자열(첫 위치 인자), `cache=True` 없음, 배열 `float32[::1]`·`float32[:, ::1]`·`int32[::1]`, 크기 `int64`.
+- halide_auto: 알고리즘만 쓰고 스케줄 호출이 없다 — 행의 `contract_violation` 에 `schedule_in_auto` 가 붙지 않아야 한다. 병렬화는 오토스케줄러(Li2018) 몫이다.
+- halide_manual: 같은 알고리즘에 응답 자신의 스케줄(split·vectorize·parallel·compute_root 등)을 붙인다.
+- rust: 내보내는 함수는 `#[no_mangle] pub unsafe extern "C"` 하나, 크기는 `i32`, rayon 외의 크레이트 없음.
+- `sort`·`bfs` × `halide_auto`·`halide_manual` 은 파일이 없다: `harness.generate` 가 `unsupported` 로 건너뛰고, `tools/devcheck.py dummies` 는 `unsupported`,
+  `analysis.aggregate --coverage` 는 `n/a` 로 낸다. 파일이 없는데 지원 조합이면 devcheck 가 `missing`(실패)으로 낸다.
+
+과제별 README 가 있는 과제(gemm, histogram, scan, nbody, sort, cholesky, floyd_warshall, bfs, fft)는 그 README 의 "새 언어" 절에 파일마다의 구현이 있다.
+과제별 README 가 없는 Tier 1 세 과제:
+
+| task | language | 내용 |
+|---|---|---|
+| jacobi2d | numba | 버퍼 두 개를 스텝마다 바꾸고 각 스텝의 행을 `prange` 로 나눈다(헬퍼 `_step` 과 진입 함수 모두 명시 시그니처). 마지막 스텝이 `dst` 에 쓰이도록 첫 대상을 고른다 |
+| jacobi2d | halide_auto | 스텝마다 Func 하나(이전 스텝만 읽음): 내부 칸은 네 이웃 평균, 나머지는 이전 값 복사. 입력만 `repeat_edge` 로 감싼다 |
+| jacobi2d | halide_manual | 같은 알고리즘 + 마지막을 뺀 스텝마다 `compute_root()`, `vectorize(x, 8, GuardWithIf).parallel(y)` |
+| jacobi2d | rust | `dst` 와 임시 버퍼를 스텝마다 바꾸고, 스텝 안에서는 출력 행을 rayon `par_chunks_mut` 로 나눈다 |
+| spmv_csr | numba | 행을 `prange` 로 나누고 행마다 반복 지역 변수에 double 로 누적, 빈 행은 0 |
+| spmv_csr | halide_auto | 곱의 누적합 S 를 double 로(RDom 갱신 S[q+1] = S[q] + 곱) 만들고 행 결과 = 행 끝과 시작의 S 차 |
+| spmv_csr | halide_manual | 같은 알고리즘 + S 는 한 번의 순차 패스(`compute_root`, 갱신은 `unscheduled`), y 는 4096행 블록 `parallel` + `vectorize` |
+| spmv_csr | rust | 1024행 블록을 rayon `par_chunks_mut` 로 나누고 행마다 f64 누적 |
+| dot | numba | 고정 1024 청크를 `prange` 로 double 합산한 뒤 청크 합을 고정 순서로 더한다(스레드 수와 무관하게 같은 결과) |
+| dot | halide_auto | 16384 원소 청크마다 double 리덕션, 청크 합과 꼬리를 고정 순서로 더한다(크기에 맞춰 파이프라인을 만든다) |
+| dot | halide_manual | 같은 알고리즘 + 청크 합 `compute_root().parallel(c)` |
+| dot | rust | 2¹⁶ 원소 블록을 rayon `par_chunks` 로 double 합산(누산기 8개), 부분합을 블록 순서로 더한다 |
+
+검증(2026-11-23, Windows 11 개발 머신): `tools/devcheck.py dummies` 에서 새 언어 44개 pass·4개 unsupported(정확성 형태 tiny·rect·small),
+더미 파이프라인(`harness.run`, check 까지)에서 numpy·numba·rust·halide_auto·halide_manual × 과제 12개 56행 pass(`docs/decisions.md` 2026-11-23).
+Linux 에서의 확인(`large`·bench 포함)은 `docs/linux_test_plan.md`.
 
 ## Tier 2 기대표 (설계 §17; 2026-11-08)
 

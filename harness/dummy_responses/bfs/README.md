@@ -1,7 +1,7 @@
 # bfs 더미 응답 (docs/harness_design.md §13·§18)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다.
-`<language>/<k>.md` 가 `sample_idx mod 파일 수` 번째 샘플의 응답이 된다(numpy·c_seq 는 1개, c_openmp 는 2개).
+`<language>/<k>.md` 가 `sample_idx mod 파일 수` 번째 샘플의 응답이 된다(c_openmp 는 2개, numpy·c_seq·numba·rust 는 1개; Halide 는 아래).
 각 파일은 실제 응답처럼 짧은 설명 + 펜스 코드 블록 하나다.
 
 파이프라인(extract → build → check → bench)이 아래 기대표대로 분류해야 한다. 분류 규칙은 §10, 정수 출력 규칙은 §17·§18.
@@ -12,6 +12,16 @@
 | c_seq | 0 | 큐 BFS(`malloc` 한 n 칸 배열, head/tail), `dist` 를 −1 로 채운 뒤 정점 0 부터 완화; 할당 실패 시 큐 없는 레벨 스윕 | 없음 (large 약 358 ms, P-core 1개) | 1 |
 | c_openmp | 0 | 레벨 동기 top-down: 프론티어 `omp for schedule(dynamic)`, `__sync_bool_compare_and_swap(&dist[v], -1, level)` 로 정점 차지, 스레드별 지역 버퍼(1024)를 `__sync_fetch_and_add` 로 예약한 구간에 복사 | 없음 (large 약 107 ms ≈ 기준선 `tasks/bfs/baseline/baseline.c`) | 1 |
 | c_openmp | 1 | 레벨 동기 BFS 의 프론티어 루프를 `#pragma omp parallel for` 로 돌리되 원자 연산 없음: `if (dist[v] == -1) { dist[v] = level; next[next_size++] = v; }` (방문 표시도 push 도 보호 없음) | check / race_condition / `nondeterministic:rect,small` (실측 6/6; 목록은 타이밍 의존, 아래 주의). 세 형태 모두에서 두 호출이 같게 틀리면 check / wrong_output / `mismatch` (§17 이 둘 다 허용) | 0 |
+
+### 새 언어 (numba · rust; Halide 는 지원하지 않음)
+
+`bfs` 는 `halide_auto`·`halide_manual` 을 지원하지 않는다(`tasks/bfs/signatures.yaml` 의 `unsupported`: CSR 그래프의 프론티어 확장은 Halide 파이프라인으로 표현할 수 없다). 그래서 그 두 디렉터리가 없고, `harness.generate` 는 건너뛰며 `tools/devcheck.py dummies` 는 `unsupported`, `analysis.aggregate --coverage` 는 `n/a` 로 낸다.
+나머지 둘은 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미"). 둘 다 정점 0 에서 시작하고 거리가 결정적이다.
+
+| language | 내용 |
+|---|---|
+| numba | `@njit("void(int32[::1], int32[::1], int32[::1], int64, int64)", parallel=True)`: 레벨 동기 BFS. 프론티어를 512 정점 청크로 잘라 `prange` 로 확장하고 아직 −1 인 이웃에 현재 레벨을 쓴다(경쟁하는 쓰기는 같은 값). 청크 번호를 `owner[w]` 에 쓰고 두 번째 `prange` 가 `owner` 가 자기 청크인 후보만 남겨 정점마다 한 번씩 다음 프론티어에 넣는다. 프론티어 간선이 16,384 이하인 레벨은 순차로 확장한다 |
+| rust | 레벨 동기 top-down BFS. `dist` 를 `[AtomicI32]` 로 보고 `par_iter` 로 −1 을 채운 뒤, 256 정점 청크를 `par_chunks(…).flat_map_iter(…).collect()` 로 확장하고 `compare_exchange(-1, level)` 로 정점을 정확히 한 번 차지한다 |
 
 ## 변형별 주의
 

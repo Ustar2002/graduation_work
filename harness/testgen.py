@@ -41,7 +41,7 @@ def write_npz_atomic(path: Path, **arrays: Any) -> None:
 def write_json_atomic(path: Path, obj: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:  # Windows 에서도 LF (매니페스트 바이트가 플랫폼과 무관하게)
             json.dump(obj, f, indent=2, ensure_ascii=False)
             f.write("\n")
             f.flush()

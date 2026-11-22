@@ -3,9 +3,9 @@ task: cholesky
 function: cholesky
 params: [A, L, n]
 args:
-  - {name: A, kind: in,  dtype: float32, shape: [n, n]}
-  - {name: L, kind: out, dtype: float32, shape: [n, n]}
-  - {name: n, kind: dim}
+  - {name: A, kind: in,  dtype: float32, shape: [n, n], doc: "A is symmetric positive definite"}
+  - {name: L, kind: out, dtype: float32, shape: [n, n], doc: "the lower-triangular Cholesky factor, stored in full: the elements on and below the diagonal hold the factor and every element above the diagonal must be 0"}
+  - {name: n, kind: dim, doc: "the matrix dimension, always consistent with the array shapes above"}
 work: "n*n*n/3"                # Cholesky 분해의 부동소수 연산 수(n³/6 곱셈-덧셈 쌍 ≈ n³/3 flop; 하위 항 생략)
 baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: true, gate_min_gflops: false}
 languages:

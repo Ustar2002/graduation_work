@@ -6,7 +6,7 @@ params: [x, out, n]
 args:
   - {name: x,   kind: in,  dtype: int32, shape: [n]}
   - {name: out, kind: out, dtype: int32, shape: [n]}
-  - {name: n,   kind: dim}
+  - {name: n,   kind: dim, doc: "the array length, always equal to the length of `x` and of the output `out`"}
 baseline: {backend: c, file: baseline/baseline.c, openmp: true}
 languages:
   numpy:

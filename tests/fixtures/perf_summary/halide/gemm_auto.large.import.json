@@ -1,0 +1,17 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "M": 1024,
+    "N": 1024,
+    "K": 1024
+  },
+  "inspect": {
+    "loop_nest": "produce C:\n  parallel i:\n    for j.j_vo:\n      vectorized j.j_vi in [0, 7]:\n        C(...) = ...\n  parallel i:\n    for k in [0, 1023]:\n      for j.j_vo:\n        vectorized j.j_vi in [0, 7]:\n          C(...) = ...\n",
+    "schedule_source": "Var j_vi(\"j_vi\");\nVar j_vo(\"j_vo\");\n\nFunc C = pipeline.get_func(2);\n\n{\n    Var j = C.args()[0];\n    Var i = C.args()[1];\n    RVar k$x(C.update(0).get_schedule().rvars()[0].var);\n    C\n        .compute_root()\n        .split(j, j_vo, j_vi, 8)\n        .vectorize(j_vi)\n        .parallel(i);\n    C.update(0)\n        .reorder(j, k$x, i)\n        .split(j, j_vo, j_vi, 8, TailStrategy::GuardWithIf)\n        .vectorize(j_vi)\n        .parallel(i);\n}\n\n",
+    "autoscheduler": "Mullapudi2016",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 15.17,
+    "jit_ms": 2127.151
+  }
+}

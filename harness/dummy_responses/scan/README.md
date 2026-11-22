@@ -1,7 +1,7 @@
 # scan 더미 응답 (docs/harness_design.md §17)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다.
-`<language>/<k>.md` 가 `sample_idx mod 파일 수` 번째 샘플의 응답이 된다(numpy·c_seq 는 1개, c_openmp 는 2개).
+`<language>/<k>.md` 가 `sample_idx mod 파일 수` 번째 샘플의 응답이 된다(c_openmp 는 2개, 그 밖의 언어는 1개).
 각 파일은 실제 응답처럼 짧은 설명 + 펜스 코드 블록 하나다.
 
 파이프라인(extract → build → check → bench)이 아래 기대표대로 분류해야 한다. 분류 규칙은 §10, 정수 출력 규칙은 §17.
@@ -12,6 +12,17 @@
 | c_seq | 0 | 순차 누적 루프 `acc += x[i]; out[i] = acc` | 없음 (large 약 13 ms, P-core 1개) | 1 |
 | c_openmp | 0 | 2-pass 블록 스캔: 스레드별 블록 합 → exclusive 오프셋 → 블록 내 순차 스캔 (스택 배열 `MAX_THREADS=256`, `num_threads` 절) | 없음 (large 약 10.5 ms ≈ 기준선 `tasks/scan/baseline/baseline.c`) | 1 |
 | c_openmp | 1 | `out[0] = x[0]; #pragma omp parallel for schedule(static)` 로 `out[i] = out[i-1] + x[i]` — 순차 의존 무시 | check / race_condition / `nondeterministic:<불일치 테스트 목록>` (실측 3/3; 목록은 타이밍 의존, 아래 주의). 세 형태 모두에서 두 호출이 같게 틀리면 check / wrong_output / `mismatch` (§17 이 둘 다 허용) | 0 |
+
+### 새 언어 (numba · halide_auto · halide_manual · rust)
+
+모두 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미"). 넷 다 2-pass 블록 스캔이고 `out` 의 모든 원소를 쓴다.
+
+| language | 내용 |
+|---|---|
+| numba | `@njit("void(int32[::1], int32[::1], int64)", parallel=True)`: 스레드마다 연속 블록 하나(`numba.get_num_threads()`), 블록 합을 `prange` 로 → 블록 합의 exclusive 스캔(순차, int64) → 두 번째 `prange` 가 블록마다 오프셋부터 누적을 쓴다 |
+| halide_auto | 알고리즘만: 8192 원소 블록, 입력은 `hl.min` 클램프 + `select`(n 밖은 0), 블록 안 inclusive 스캔과 블록 합의 exclusive 스캔을 RDom 갱신으로, `out[i] = local[i%block, i//block] + offset[i//block]`. 스케줄 호출 없음 |
+| halide_manual | 같은 알고리즘 + `local.compute_root().vectorize(j, 8).parallel(k)`, `local.update(0).parallel(k)`(블록 안은 순차, 블록끼리 병렬), `offset.compute_root()`, `out` 은 8192 로 split 해 parallel·vectorize(`GuardWithIf`) |
+| rust | rayon `par_chunks(1<<16)` 로 블록 합 → 블록 합의 순차 exclusive 스캔(i32; 최대 접두합 31·2²⁵ < 2³¹) → `par_chunks_mut` 와 `par_chunks` 를 묶어 블록마다 누적을 쓴다 |
 
 ## 변형별 주의
 

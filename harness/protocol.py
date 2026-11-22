@@ -1,18 +1,24 @@
-"""측정 규약 강제 (설계 §9): 거버너·EPP·turbo·taskset·BLAS 정체(정적), 부하·코어 사용률(동적),
-워커 실행 접두(``taskset``)와 화이트리스트 환경, 머신 프로브(``config/machine.yaml``), 환경 지문.
+"""측정 규약 강제 (설계 §9, v3 §0·§3·§9.5): 거버너·EPP·turbo·taskset·BLAS 정체(정적), 부하·코어 사용률(동적),
+워커 실행 접두(``taskset``)와 화이트리스트 환경, 머신 프로브(``config/machine.yaml``), 툴체인 정체, 환경 지문.
+
+하네스는 Linux 전용 측정 도구다. 다른 플랫폼(개발용 Windows)에서도 임포트되고 검사 함수가 죽지 않지만, 그때 만든 상태에는
+플래그 ``platform=<sys.platform>`` 이 붙어 그 행은 ``protocol_ok=0`` 이다(설계 v3 §0).
 
 CLI:
     python -m harness.protocol --check                  # static + dynamic 결과 JSON (플래그 있으면 exit 1)
     python -m harness.protocol --probe [--write [PATH]] # 머신 프로브 JSON; --write 면 machine.yaml 저장
     python -m harness.protocol --fingerprint            # 환경 지문 (machine.yaml 필요)
     python -m harness.protocol --env-identity           # (내부용) 현재 인터프리터의 python/numpy/BLAS/SDK 정체 JSON
+    python -m harness.protocol --python-toolchain NAME  # (내부용) 현재 인터프리터의 numba·halide·린트 도구와 오토스케줄러 NAME
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.metadata
+import io
 import json
 import os
 import platform
@@ -25,13 +31,14 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import yaml
 
 from harness.config import Config, ConfigError, load_config, load_machine, parse_cpulist
 from harness.paths import PYTHON_EXE, ROOT, atomic_write_text, machine_yaml_for_host
-from harness.procutil import run_isolated
+from harness.procutil import IS_POSIX, run_isolated
 
 _LOG = "[protocol]"
 
@@ -43,11 +50,42 @@ FIX_EPP = "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/ener
 
 # 정보용 플래그(ok 판정에서 제외): turbo 상태, 사용자 환경의 스레드 변수 제거 알림
 # load_1m 은 2026-11-08 부터 정보용: 직전 샘플의 4스레드 bench 가 올린 1분 평균을 다음 검사가 읽는 자기 부하라 판정에서 뺀다(decisions.md).
-INFO_FLAG_PREFIXES: tuple[str, ...] = ("turbo=", "env_overrides_dropped", "load_1m=")
+# multiple_libgomp 은 2026-11-23 부터: numba(스레딩 계층 omp)와 C+OpenMP 기준선이 서로 다른 libgomp 를 올린 bench 를 표시만 한다
+# (2026-11-12 결정은 둘이 하나를 공유한다고 가정한다 — Linux 에서 확인할 것; 규약 위반으로 세지는 않는다).
+INFO_FLAG_PREFIXES: tuple[str, ...] = ("turbo=", "env_overrides_dropped", "load_1m=", "multiple_libgomp")
 
 # 워커 환경 화이트리스트(상속 허용)와 고정값, 제거 대상 접두
 ENV_INHERIT: tuple[str, ...] = ("PATH", "HOME", "LANG", "TMPDIR", "VIRTUAL_ENV")
 ENV_DROP_PREFIXES: tuple[str, ...] = ("OMP_", "GOMP_", "OPENBLAS_", "MKL_", "KMP_")
+
+DEFAULT_CC = "gcc"  # 설정 없이 도는 프로브가 쓰는 컴파일러
+# cargo·rustc 를 띄우는 환경에 더하는 사용자 변수(rustup 의 위치와 툴체인 고정). 빌드(build/rust.py)와 도구 점검이 같은 환경을 쓴다.
+TOOLCHAIN_ENV_KEYS: tuple[str, ...] = ("CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN")
+RUNTIME_PROBE_TIMEOUT_S = 120.0  # --probe-runtime 서브프로세스의 시간 상한
+
+# 설계 v3 §3 의 선택 설정과 그 기본값(YAML 에 키를 쓰지 않았을 때와 같은 값). 앞의 것들은 Config 기준, 마지막 둘은
+# LanguageCfg 기준의 속성 경로다. 이 키들을 모르던 때의 Config(해당 속성이 없다)와 설정 없이 도는 프로브(cfg=None)도
+# ``config_option`` 으로 읽으면 같은 값이 나온다. 값은 읽기 전용으로 쓴다(공유 객체).
+OPTION_DEFAULTS: dict[str, Any] = {
+    "lint.enabled": True,
+    "safety.enabled": False,
+    "perf_summary.enabled": True,
+    "halide.autoscheduler": "Li2018",
+    "halide.autoscheduler_params": {},
+    "build.rust": SimpleNamespace(cargo="cargo", rustflags=["-C", "target-cpu=native"],
+                                  rustflags_linux=["-C", "link-arg=-Wl,--no-undefined"], build_timeout_s=600.0, offline=True),
+    "env": {},
+    "halide_mode": None,
+}
+_MISSING = object()
+
+# PATH 에서 찾는 린트 도구와, ``--version`` 출력에서 버전을 읽는 정규식(plugins/lint/run_lint.py 가 남기는 버전과 같은 문자열)
+PATH_LINT_TOOLS: dict[str, re.Pattern[str]] = {
+    "cppcheck": re.compile(r"Cppcheck (\S+)"),
+    "clang-tidy": re.compile(r"version (\S+)"),
+}
+# PYTHON_EXE 의 패키지로 도는 린트 도구(배포 이름)
+PYTHON_LINT_TOOLS: tuple[str, ...] = ("ruff", "pyflakes")
 
 # /proc/cpuinfo flags 중 기록할 ISA 비트(순서 고정)
 ISA_FLAGS_OF_INTEREST: tuple[str, ...] = (
@@ -101,6 +139,31 @@ class DynamicStatus:
 def now_iso() -> str:
     """시간대 포함 ISO 8601(초 단위)."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def config_option(obj: Any, path: str) -> Any:
+    """선택 설정 ``obj.<path>`` (점으로 이은 속성 경로; ``OPTION_DEFAULTS`` 의 키). 경로의 속성이 하나라도 없으면 그 기본값."""
+    value = obj
+    for name in path.split("."):
+        value = getattr(value, name, _MISSING)
+        if value is _MISSING:
+            return OPTION_DEFAULTS[path]
+    return value
+
+
+def platform_flag(platform_name: str | None = None) -> str | None:
+    """Linux 가 아니면 플래그 ``platform=<sys.platform>`` (정보용이 아니다), Linux 면 None.
+
+    Linux 밖에서는 거버너·코어 고정·부하를 확인할 수 없어 측정 규약이 성립하지 않는다. 인자는 테스트용이다(기본: 현재 플랫폼).
+    """
+    name = sys.platform if platform_name is None else platform_name
+    return None if name.startswith("linux") else f"platform={name}"
+
+
+def read_load_1m() -> float:
+    """1분 load average. ``os.getloadavg`` 가 없는 플랫폼(Windows)은 0.0 이다 — 잰 값이 아님은 ``platform=`` 플래그가 알린다."""
+    getloadavg = getattr(os, "getloadavg", None)
+    return float(getloadavg()[0]) if getloadavg is not None else 0.0
 
 
 def _read_text(path: Path) -> str | None:
@@ -279,7 +342,7 @@ def warn_power_settings(governor: str, governor_ok: bool, epp: str, epp_ok: bool
 
 
 def check_static(cfg: Config, machine: dict[str, Any]) -> StaticStatus:
-    """run당 1회: 거버너·EPP·turbo·taskset·BLAS 정체. 플래그는 경고(해결 명령 포함)와 함께 돌려준다."""
+    """run당 1회: 플랫폼·거버너·EPP·turbo·taskset·BLAS 정체. 플래그는 경고(해결 명령 포함)와 함께 돌려준다."""
     cpus = pinned_cpus(cfg)
     require = cfg.measurement.require_performance_governor
     governor, governor_ok = governor_status(cpus)
@@ -291,6 +354,11 @@ def check_static(cfg: Config, machine: dict[str, Any]) -> StaticStatus:
     blas_ok = "openblas" in blas_name.lower()
 
     flags: list[str] = []
+    platform_mark = platform_flag()
+    if platform_mark:
+        flags.append(platform_mark)
+        print(f"{_LOG} 경고: Linux 가 아니라 측정 규약을 강제할 수 없다 (플래그 {platform_mark}; 이 run 의 행은 protocol_ok=0)",
+              file=sys.stderr)
     if require:
         if not governor_ok:
             flags.append(f"governor={governor}")
@@ -342,7 +410,11 @@ def check_static(cfg: Config, machine: dict[str, Any]) -> StaticStatus:
 
 
 def check_dynamic(cfg: Config, *, sample_s: float = 1.0) -> DynamicStatus:
-    """bench 직전마다: 1초 ``/proc/stat`` 샘플로 고정 코어·형제 코어 사용률, load average, 거버너 재확인."""
+    """bench 직전마다: 1초 ``/proc/stat`` 샘플로 고정 코어·형제 코어 사용률, load average, 거버너 재확인.
+
+    ``load_1m`` 은 정보용 플래그다(``INFO_FLAG_PREFIXES``; 2026-11-08): 넘어도 ``ok`` 판정에는 들어가지 않는다.
+    ``/proc/stat``·``os.getloadavg`` 가 없는 플랫폼에서는 사용률과 load 가 0 으로 남고 ``platform=`` 플래그가 붙는다.
+    """
     cpus = pinned_cpus(cfg)
     sibs = sibling_cpus(cpus)
     before = read_proc_stat()
@@ -350,7 +422,7 @@ def check_dynamic(cfg: Config, *, sample_s: float = 1.0) -> DynamicStatus:
     after = read_proc_stat()
     pinned_busy = busy_pct(before, after, cpus)
     sibling_busy = busy_pct(before, after, sibs) if sibs else 0.0
-    load_1m = float(os.getloadavg()[0])
+    load_1m = read_load_1m()
     m = cfg.measurement
     load_ok = load_1m <= m.max_load_1m
     busy_ok = pinned_busy <= m.max_pinned_busy_pct and sibling_busy <= m.max_pinned_busy_pct
@@ -369,6 +441,9 @@ def check_dynamic(cfg: Config, *, sample_s: float = 1.0) -> DynamicStatus:
     for f in flags:
         if not f.startswith("governor="):
             print(f"{_LOG} 경고: 동적 규약 위반 {f}", file=sys.stderr)
+    platform_mark = platform_flag()
+    if platform_mark:  # check_static 이 이미 경고했다(샘플마다 되풀이하지 않는다)
+        flags.append(platform_mark)
 
     return DynamicStatus(
         load_1m=load_1m,
@@ -411,8 +486,10 @@ def bench_cpus(cfg: Config) -> str:
 def call_cpus(cfg: Config, *, backend: str, openmp: bool, threads: int) -> str | None:
     """bench(교차 측정)에서 그 코드를 **호출하는 동안** 워커의 주 스레드가 가져야 할 CPU 집합(taskset 목록 문자열).
 
-    - OpenMP C 코드: ``None`` — libgomp 가 ``OMP_PROC_BIND``·``OMP_PLACES`` 로 정한 고정(주 스레드 = place 0)을 그대로 둔다.
-    - 스레드를 쓸 수 있는 그 밖의 코드(python): bench 워커의 고정 코어 전체. 프롬프트에 적은 환경(고정 코어 전체, 스레드 수)과 같다.
+    - OpenMP 런타임 위에서 도는 코드(``openmp``; OpenMP C, 그리고 스레딩 계층이 omp 인 numba — ``LanguageCfg.omp_runtime``):
+      ``None`` — libgomp 가 ``OMP_PROC_BIND``·``OMP_PLACES`` 로 정한 고정(주 스레드 = place 0)을 그대로 둔다.
+    - 스레드를 쓸 수 있는 그 밖의 코드(python, halide, rayon 을 쓰는 rust): bench 워커의 고정 코어 전체. 프롬프트에 적은
+      환경(고정 코어 전체, 스레드 수)과 같다. 그 코드가 처음 만드는 스레드 풀이 이 마스크를 물려받는다.
     - 순차 코드(``threads == 1``; c_seq): 고정 코어의 첫 CPU 하나. 프롬프트의 "코어 1개에 고정"과 같다. 첫 CPU 는 OpenMP 주
       스레드의 place 이자 워커의 주 스레드가 이미 돌던 CPU 라서, 호출마다 식은 코어로 옮겨 가지 않고(검토 실측: 다른 코어로
       옮기면 +36 %) libgomp 작업 스레드의 코어(나머지 place)와도 겹치지 않는다. check 단계의 ``single_core`` 는 프로세스
@@ -420,8 +497,12 @@ def call_cpus(cfg: Config, *, backend: str, openmp: bool, threads: int) -> str |
 
     왜 필요한가: 교차 측정에서는 한 프로세스에 OpenMP 공유 객체가 함께 로드되면 libgomp 가 주 스레드를 CPU 하나에 묶는다.
     OpenMP 가 아닌 코드를 부를 때 이 집합을 적용해야 그 코드가 만드는 스레드가 1-CPU 마스크를 물려받지 않는다
-    (2026-11-11, docs/decisions.md). 반환값은 언제나 ``bench_cpus(cfg)`` 의 부분집합이다."""
-    if backend == "c" and openmp:
+    (2026-11-11, docs/decisions.md). 반환값은 언제나 ``bench_cpus(cfg)`` 의 부분집합이다.
+
+    ``backend`` 는 판정에 쓰지 않는다(호출부의 기록용). 2026-11-11 판의 조건은 ``backend == "c" and openmp`` 였는데, 그때
+    가능하던 조합(C·python 에서 ``openmp`` 는 C 일 때만 참)에서는 지금 규칙과 결과가 같다 — 새 언어의 규칙만 더한 것이라
+    ``CALL_AFFINITY_POLICY`` 는 올리지 않았다(2026-11-23)."""
+    if openmp:
         return None
     pinned = bench_cpus(cfg)
     if int(threads) == 1:
@@ -429,9 +510,10 @@ def call_cpus(cfg: Config, *, backend: str, openmp: bool, threads: int) -> str |
     return pinned
 
 
-def launch_env(cfg: Config, threads: int, *, openmp: bool) -> dict[str, str]:
+def launch_env(cfg: Config, threads: int, *, openmp: bool, extra_env: dict[str, str] | None = None) -> dict[str, str]:
     """워커 환경: 화이트리스트(PATH, HOME, LANG, TMPDIR, VIRTUAL_ENV 상속; LC_ALL=C, PYTHONHASHSEED=0, PYTHONPATH=ROOT)
-    + 스레드 변수(OMP/OPENBLAS/MKL_NUM_THREADS=threads) + (openmp 이면) ``measurement.omp_env_extra``.
+    + 스레드 변수(OMP/OPENBLAS/MKL_NUM_THREADS=threads) + (openmp 이면) ``measurement.omp_env_extra``
+    + ``extra_env`` (언어의 ``env`` 설정 — NUMBA_/RAYON_/HL_ 스레드 변수 등; 마지막에 덮어쓴다).
 
     사용자 환경의 OMP_*/GOMP_*/OPENBLAS_*/MKL_*/KMP_* 는 상속하지 않고 한 번 경고한다(플래그 env_overrides_dropped).
     """
@@ -443,6 +525,9 @@ def launch_env(cfg: Config, threads: int, *, openmp: bool) -> dict[str, str]:
     env["LC_ALL"] = "C"
     env["PYTHONHASHSEED"] = "0"
     env["PYTHONPATH"] = str(ROOT)  # 어떤 cwd 에서도 `python -m harness.worker` 가 되게
+    if not IS_POSIX:
+        # 개발용 Windows: 워커의 진단(로그 파일로 가는 stderr)이 로캘 코드페이지가 아니라 UTF-8 로 남게 한다
+        env["PYTHONIOENCODING"] = "utf-8"
 
     dropped = dropped_env_overrides()
     new_drops = [k for k in dropped if k not in _warned_env_drop]
@@ -458,6 +543,8 @@ def launch_env(cfg: Config, threads: int, *, openmp: bool) -> dict[str, str]:
     env["OPENBLAS_THREAD_TIMEOUT"] = str(int(getattr(cfg.measurement, "openblas_thread_timeout", 16)))
     if openmp:
         env.update({k: str(v) for k, v in cfg.measurement.omp_env_extra.items()})
+    if extra_env:
+        env.update({k: str(v) for k, v in extra_env.items()})
     return env
 
 
@@ -495,15 +582,17 @@ def blas_identity() -> dict[str, Any]:
     return {"name": name, "version": version, "config": config, "loaded_lib": ";".join(loaded)}
 
 
+def _dist_version(dist: str) -> str | None:
+    """설치된 배포판의 버전(임포트 없이 메타데이터만). 없으면 None."""
+    try:
+        return importlib.metadata.version(dist)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def _sdk_versions() -> dict[str, str | None]:
-    """설치된 LLM SDK 버전(임포트 없이 메타데이터만)."""
-    out: dict[str, str | None] = {}
-    for dist in ("anthropic", "openai"):
-        try:
-            out[dist] = importlib.metadata.version(dist)
-        except importlib.metadata.PackageNotFoundError:
-            out[dist] = None
-    return out
+    """설치된 LLM SDK 버전."""
+    return {dist: _dist_version(dist) for dist in ("anthropic", "openai")}
 
 
 def env_identity() -> dict[str, Any]:
@@ -578,21 +667,96 @@ def launch_env_minimal() -> dict[str, str]:
     return env
 
 
+def toolchain_env(*, posix: bool | None = None) -> dict[str, str]:
+    """cargo·rustc 를 띄우는 환경: POSIX 는 ``launch_env_minimal`` + 사용자의 ``TOOLCHAIN_ENV_KEYS`` (rustup 이 툴체인을 찾는 데
+    필요하다), 그 밖(개발용 Windows)은 현재 환경 전체. Rust 빌드(``harness.build.rust``)와 도구 점검(``toolchain_identity``)이
+    같은 함수(``rust_tool_env``)를 써서 점검한 rustc 와 빌드한 rustc 가 같다. ``posix`` 는 테스트용이다(기본: ``procutil.IS_POSIX``)."""
+    if not (IS_POSIX if posix is None else posix):
+        return dict(os.environ)
+    env = launch_env_minimal()
+    env.update({key: os.environ[key] for key in TOOLCHAIN_ENV_KEYS if key in os.environ})
+    return env
+
+
+def rust_tool(name: str, configured: str | None = None) -> str:
+    """``cargo``·``rustc`` 의 실행 파일(빌드·프롬프트·도구 점검이 같이 쓴다).
+
+    ``configured``(설정의 ``build.rust.cargo`` 등)가 경로(구분자 포함)면 그대로 쓴다. 이름뿐이면 PATH → ``$CARGO_HOME/bin`` →
+    ``~/.cargo/bin`` 순으로 찾는다. rustup 은 셸 설정을 바꾸지 않고 설치할 수 있어(decisions.md 2026-11-12: PATH 를
+    건드리지 않았다) PATH 에 없는 것이 정상일 수 있다. 어디에도 없으면 이름을 그대로 돌려준다 — 호출부가 실행에 실패해
+    ``ToolchainMissing`` 으로 알린다."""
+    want = configured or name
+    if os.sep in want or (os.altsep is not None and os.altsep in want):
+        return want
+    found = shutil.which(want)
+    if found:
+        return found
+    exe = want + (".exe" if os.name == "nt" and not want.lower().endswith(".exe") else "")
+    for home in (os.environ.get("CARGO_HOME"), str(Path.home() / ".cargo")):
+        if home:
+            candidate = Path(home) / "bin" / exe
+            if candidate.is_file():
+                return str(candidate)
+    return want
+
+
+def rust_tool_env(cargo: str | None = None, *, posix: bool | None = None) -> dict[str, str]:
+    """``rust_tool`` 로 찾은 cargo·rustc 를 띄우는 환경: ``toolchain_env`` 의 PATH 앞에 ``cargo`` 의 디렉터리를 붙인다(경로일
+    때만). rustup 을 PATH 를 바꾸지 않고 설치한 머신(decisions.md 2026-11-12)에서도 cargo 가 같은 디렉터리의 rustc 를 찾는다.
+    ``cargo`` 가 None 이면 ``rust_tool("cargo")``."""
+    env = toolchain_env(posix=posix)
+    tool = rust_tool("cargo") if cargo is None else cargo
+    parent = os.path.dirname(tool)
+    if parent:
+        env["PATH"] = parent + os.pathsep + env["PATH"] if env.get("PATH") else parent
+    return env
+
+
+def rust_flags(rcfg: Any, *, linux: bool | None = None) -> list[str]:
+    """Rust 빌드의 ``RUSTFLAGS`` 원소: 설정의 ``rustflags`` + (Linux 에서만) ``rustflags_linux``.
+
+    빌드(``harness.build.rust``), 프롬프트의 빌드 명령(``harness.generate``), 행의 ``cflags`` 열이 모두 이 함수의 값을 써서
+    공개한 명령과 실행한 명령이 같다. ``rcfg`` 는 ``RustCfg`` 또는 같은 속성을 가진 객체(``config_option`` 의 기본값),
+    ``linux`` 는 테스트용이다(기본: ``sys.platform`` 이 linux 로 시작하는가)."""
+    flags = [str(f) for f in (getattr(rcfg, "rustflags", None) or [])]
+    if sys.platform.startswith("linux") if linux is None else linux:
+        flags += [str(f) for f in (getattr(rcfg, "rustflags_linux", None) or [])]
+    return flags
+
+
 # ----------------------------------------------------------------------------- 컴파일러·머신 프로브
 
 
-def compiler_version(cc: str) -> str | None:
-    """``cc --version`` 첫 줄. 없으면 None."""
-    if shutil.which(cc) is None:
+def _version_output(command: str, env: dict[str, str] | None = None) -> str | None:
+    """``command --version`` 의 stdout(앞뒤 공백 제거). 실행 파일이 없거나 실행이 실패했거나 출력이 없으면 None.
+    ``env`` 가 없으면 ``launch_env_minimal()`` 로 띄운다."""
+    if shutil.which(command) is None:
         return None
     try:
-        r = run_isolated([cc, "--version"], timeout_s=30, cwd=ROOT, env=launch_env_minimal())
+        r = run_isolated([command, "--version"], timeout_s=30, cwd=ROOT, env=launch_env_minimal() if env is None else env)
     except OSError:
         return None
     if r.rc != 0:
         return None
-    first = r.stdout_tail.strip().splitlines()
-    return first[0].strip() if first else None
+    return r.stdout_tail.strip() or None
+
+
+def compiler_version(cc: str, env: dict[str, str] | None = None) -> str | None:
+    """``cc --version`` 첫 줄(gcc·clang·cargo·rustc 공통). 없으면 None. ``env``: ``_version_output`` 과 같다."""
+    text = _version_output(cc, env)
+    return text.splitlines()[0].strip() if text else None
+
+
+def path_tool_version(tool: str, pattern: re.Pattern[str]) -> str | None:
+    """PATH 의 ``tool --version`` 출력에서 ``pattern`` 의 첫 그룹(버전 문자열). 도구가 없으면 None.
+
+    출력은 있는데 패턴이 맞지 않으면(모르는 형식) 첫 줄을 그대로 돌려준다 — 있는 도구를 없다고 적지 않는다.
+    """
+    text = _version_output(tool)
+    if text is None:
+        return None
+    m = pattern.search(text)
+    return m.group(1) if m else text.splitlines()[0].strip()
 
 
 _MARCH_RE = re.compile(r"^\s*-(march|mtune)=\s*(\S+)\s*$")
@@ -694,8 +858,170 @@ def _sudo_nopasswd() -> bool:
     return r.rc == 0
 
 
-def probe_machine(cc: str = "gcc") -> dict[str, Any]:
-    """§2 ``machine.yaml`` 키 전부를 실측한다(BLAS·SDK 버전은 PYTHON_EXE 서브프로세스로)."""
+# ----------------------------------------------------------------------------- 툴체인 정체 (설계 v3 §9.5)
+
+
+def halide_autoscheduler_error(name: str) -> str | None:
+    """현재 인터프리터에서 Halide 오토스케줄러 ``name`` 의 플러그인을 로드해 본다. 되면 None, 안 되면 사유 한 줄.
+
+    워커가 쓰는 로더(``harness.kernels.halide_pipe.load_autoscheduler``; 설계 v3 §8.3)를 그대로 부른다 — 도구 점검과 워커가
+    다른 답을 내면 없는 플러그인이 ``compile_error`` 행이 된다. 로더가 stderr 에 적는 사유를 가로채 돌려준다.
+    """
+    import halide as hl
+
+    from harness.kernels import KernelError
+    from harness.kernels.halide_pipe import load_autoscheduler
+
+    said = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(said):
+            load_autoscheduler(hl, name)
+    except KernelError as e:
+        return " ".join(said.getvalue().split()) or e.detail
+    return None
+
+
+def python_toolchain(autoscheduler: str) -> dict[str, Any]:
+    """현재 인터프리터에서 쓸 수 있는 numba·halide·린트 도구(``--python-toolchain`` 이 출력하는 것).
+
+    - ``numba_version`` / ``halide_version``: 임포트가 되면 버전, 안 되면 None. 메타데이터가 아니라 실제 임포트로 확인한다 —
+      설치돼 있어도 임포트가 깨져 있으면 워커가 커널을 돌릴 수 없다.
+    - ``halide_autoscheduler_loadable``: 오토스케줄러 ``autoscheduler`` 의 플러그인이 로드되는가(halide 가 없으면 None).
+    - ``lint_tools``: ruff·pyflakes 의 버전(설치돼 있지 않으면 None).
+    - ``errors``: 쓸 수 없는 것의 사유(``numba``, ``halide``, ``halide_autoscheduler``).
+    """
+    out: dict[str, Any] = {"numba_version": None, "halide_version": None, "halide_autoscheduler_loadable": None,
+                           "lint_tools": {tool: _dist_version(tool) for tool in PYTHON_LINT_TOOLS}, "errors": {}}
+    for package in ("numba", "halide"):
+        try:
+            module = __import__(package)
+        except Exception as e:  # noqa: BLE001 - ImportError 뿐 아니라 임포트 중의 어떤 예외든 "쓸 수 없다"
+            out["errors"][package] = f"{type(e).__name__}: {e}"
+            continue
+        # halide 패키지에는 __version__ 이 없다(22.1): 메타데이터에서 읽는다
+        out[f"{package}_version"] = str(getattr(module, "__version__", None) or _dist_version(package) or "unknown")
+    if out["halide_version"] is not None:
+        error = halide_autoscheduler_error(autoscheduler)
+        out["halide_autoscheduler_loadable"] = error is None
+        if error is not None:
+            out["errors"]["halide_autoscheduler"] = error
+    return out
+
+
+def python_toolchain_subprocess(autoscheduler: str, python_exe: Path = PYTHON_EXE) -> dict[str, Any]:
+    """``PYTHON_EXE -m harness.protocol --python-toolchain <autoscheduler>`` 를 격리 실행한 결과(``python_toolchain`` 의 형태).
+
+    커널을 돌리는 것은 오케스트레이터가 아니라 ``PYTHON_EXE`` 이므로 그 인터프리터에서 확인한다. 실행이 실패해도 예외 없이
+    전부 None 인 결과를 주고 사유를 ``errors["python"]`` 에 적는다.
+    """
+    try:
+        r = run_isolated([str(python_exe), "-m", "harness.protocol", "--python-toolchain", autoscheduler],
+                         timeout_s=120, cwd=ROOT, env=launch_env_minimal(), tail_chars=200_000)
+    except OSError as e:
+        reason = f"{python_exe} 실행 실패: {e}"
+    else:
+        line = next((ln for ln in reversed(r.stdout_tail.strip().splitlines()) if ln.startswith("{")), "")
+        try:
+            data = json.loads(line) if r.rc == 0 else None
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            return data
+        reason = f"rc={r.rc}, timed_out={r.timed_out}: {r.stderr_tail.strip()[-500:]}"
+    print(f"{_LOG} 경고: python-toolchain 서브프로세스 실패: {reason}", file=sys.stderr)
+    return {"numba_version": None, "halide_version": None, "halide_autoscheduler_loadable": None,
+            "lint_tools": dict.fromkeys(PYTHON_LINT_TOOLS), "errors": {"python": reason}}
+
+
+def runtime_probe(kind: str, *, autoscheduler: str | None = None, params: dict[str, Any] | None = None,
+                  threads: int | None = None) -> str | None:
+    """현재 인터프리터에서 언어의 런타임 설정을 워커와 같은 코드로 써 본다(``--probe-runtime``). 되면 None, 안 되면 사유 한 줄.
+    LLM 코드는 실행하지 않는다.
+
+    - ``halide``: ``harness.kernels.halide_pipe.make_loader`` (워커의 준비 그대로): 오토스케줄러 플러그인 로드 + 하네스의 한 줄짜리
+      파이프라인에 설정의 매개변수(+ 하네스가 더하는 ``parallelism`` = ``threads``)로 오토스케줄러 적용. 모르는 매개변수 키는
+      Halide 22.1 에서 예외가 아니라 프로세스 중단이다 — 부모(``runtime_probe_subprocess``)가 종료 코드로 알아챈다.
+    - ``numba``: ``harness.kernels.pyfunc.start_threading_layer`` — 환경의 ``NUMBA_THREADING_LAYER`` 를 띄운다.
+    """
+    try:
+        if kind == "halide":
+            from harness.kernels import KernelOptions
+            from harness.kernels.halide_pipe import make_loader
+
+            make_loader(KernelOptions(threads=threads, halide_mode="auto", halide_autoscheduler=str(autoscheduler),
+                                      halide_params=dict(params or {})))
+        elif kind == "numba":
+            from harness.kernels.pyfunc import start_threading_layer
+
+            start_threading_layer()
+        else:
+            raise ValueError(f"모르는 런타임 점검: {kind!r}")
+    except Exception as e:  # noqa: BLE001 - 어떤 실패든 "그 설정을 쓸 수 없다"
+        return f"{type(e).__name__}: {' '.join(str(getattr(e, 'detail', None) or e).split())}"
+    return None
+
+
+def runtime_probe_subprocess(kind: str, *, env: dict[str, str], prefix: list[str] | None = None, autoscheduler: str | None = None,
+                             params: dict[str, Any] | None = None, threads: int | None = None,
+                             python_exe: Path = PYTHON_EXE) -> str | None:
+    """``[prefix…] PYTHON_EXE -m harness.protocol --probe-runtime <kind> …`` 를 언어의 환경 ``env`` 로 격리 실행한다(run.py 의
+    도구 점검). 되면 None, 안 되면 사유 한 줄 — 결과 JSON 없이 끝난 프로세스(Halide 의 중단 등)도 사유가 된다."""
+    cmd = [*(prefix or []), str(python_exe), "-m", "harness.protocol", "--probe-runtime", kind]
+    if kind == "halide":
+        cmd += ["--halide-autoscheduler", str(autoscheduler), "--halide-params", json.dumps(dict(params or {}), sort_keys=True),
+                "--threads", str(threads)]
+    try:
+        r = run_isolated(cmd, timeout_s=RUNTIME_PROBE_TIMEOUT_S, cwd=ROOT, env=env, tail_chars=200_000)
+    except OSError as e:
+        return f"{python_exe} 실행 실패: {e}"
+    line = next((ln for ln in reversed(r.stdout_tail.strip().splitlines()) if ln.startswith("{")), "")
+    try:
+        data = json.loads(line) if r.rc == 0 else None
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict) and "error" in data:
+        return None if data["error"] is None else str(data["error"])
+    stderr = " | ".join(ln.strip() for ln in r.stderr_tail.strip().splitlines()[-5:] if ln.strip())
+    return f"점검 프로세스가 결과 없이 끝났다 (rc={r.rc}, timed_out={r.timed_out}, signal={r.signal_name}): {stderr[-500:]}"
+
+
+def toolchain_identity(cfg: Config | None) -> dict[str, Any]:
+    """빌드·실행·린트 도구의 정체. run.py 의 도구 점검(설계 v3 §9.5)과 머신 프로브가 쓴다(환경 지문에는 넣지 않는다 —
+    지문의 키는 2026-11-12 측정 규약 그대로다; docs/decisions.md 2026-11-23).
+
+    - ``cc`` (설정의 컴파일러 이름), ``cc_version`` / ``cargo`` / ``rustc`` (``--version`` 첫 줄).
+    - ``numba_version`` / ``halide_version``, ``halide_autoscheduler`` (설정의 이름) / ``halide_autoscheduler_loadable``.
+    - ``lint_tools``: ruff·pyflakes(``PYTHON_EXE`` 의 패키지), cppcheck·clang-tidy(PATH) 의 버전.
+    - ``errors``: ``python_toolchain`` 이 남긴 사유.
+
+    쓸 수 없는 도구의 값은 None 이다. ``cfg`` 가 None 이면(설정 없이 도는 프로브) cc=gcc 와 ``OPTION_DEFAULTS`` 로 본다.
+    """
+    cc = cfg.build.cc if cfg is not None else DEFAULT_CC
+    autoscheduler = str(config_option(cfg, "halide.autoscheduler"))
+    py = python_toolchain_subprocess(autoscheduler)
+    lint_tools = dict(py["lint_tools"])
+    for tool, pattern in PATH_LINT_TOOLS.items():
+        lint_tools[tool] = path_tool_version(tool, pattern)
+    cargo = rust_tool("cargo", str(config_option(cfg, "build.rust").cargo))
+    return {
+        "cc": cc,
+        "cc_version": compiler_version(cc),
+        # cargo·rustc 는 빌드와 같은 실행 파일(rust_tool)·환경(rust_tool_env: RUSTUP_TOOLCHAIN·RUSTUP_HOME·CARGO_HOME + cargo 의
+        # 디렉터리를 앞에 붙인 PATH)으로 본다
+        "cargo": compiler_version(cargo, env=rust_tool_env(cargo)),
+        "rustc": compiler_version(rust_tool("rustc"), env=rust_tool_env(cargo)),
+        "numba_version": py["numba_version"],
+        "halide_version": py["halide_version"],
+        "halide_autoscheduler": autoscheduler,
+        "halide_autoscheduler_loadable": py["halide_autoscheduler_loadable"],
+        "lint_tools": lint_tools,
+        "errors": dict(py["errors"]),
+    }
+
+
+def probe_machine(cfg: Config | None = None) -> dict[str, Any]:
+    """§2 ``machine.yaml`` 키 전부를 실측한다(BLAS·SDK 버전은 PYTHON_EXE 서브프로세스로). 컴파일러·cargo·오토스케줄러는
+    설정의 것을 본다(``toolchain_identity``; ``cfg`` 가 None 이면 기본값)."""
     cpus = online_cpus()
     packages: set[str] = set()
     cores: set[tuple[str, str]] = set()
@@ -729,9 +1055,10 @@ def probe_machine(cc: str = "gcc") -> dict[str, Any]:
     identity = env_identity_subprocess()
     core_pattern = _read_text(Path("/proc/sys/kernel/core_pattern")) or ""
 
-    gcc_ver = compiler_version("gcc")
-    clang_ver = compiler_version("clang")
-    cc_ver = gcc_ver if cc == "gcc" else compiler_version(cc)
+    toolchain = toolchain_identity(cfg)
+    cc = toolchain["cc"]
+    gcc_ver = toolchain["cc_version"] if cc == "gcc" else compiler_version("gcc")
+    clang_ver = toolchain["cc_version"] if cc == "clang" else compiler_version("clang")
     compilers: dict[str, Any] = {
         "gcc": gcc_ver,
         "clang": clang_ver,
@@ -739,7 +1066,7 @@ def probe_machine(cc: str = "gcc") -> dict[str, Any]:
         "openmp_clang": _openmp_works("clang") if clang_ver else False,
     }
     if cc not in ("gcc", "clang"):
-        compilers[cc] = cc_ver
+        compilers[cc] = toolchain["cc_version"]
 
     notes: list[str] = []
     if p_cores and e_cores:
@@ -787,6 +1114,13 @@ def probe_machine(cc: str = "gcc") -> dict[str, Any]:
         "numpy_version": identity.get("numpy_version"),
         "numpy_blas": identity.get("numpy_blas"),
         "sdk_versions": identity.get("sdk_versions"),
+        "cargo": toolchain["cargo"],
+        "rustc": toolchain["rustc"],
+        "numba_version": toolchain["numba_version"],
+        "halide_version": toolchain["halide_version"],
+        "halide_autoscheduler": toolchain["halide_autoscheduler"],
+        "halide_autoscheduler_loadable": toolchain["halide_autoscheduler_loadable"],
+        "lint_tools": toolchain["lint_tools"],
         "bandwidth_gbs": None,
         "peak_gflops": None,
         "notes": "; ".join(notes),
@@ -806,7 +1140,12 @@ def write_machine_yaml(machine: dict[str, Any], path: Path | None = None) -> Pat
 
 
 def environment_fingerprint(cfg: Config, machine: dict[str, Any], static: StaticStatus) -> tuple[dict[str, Any], str]:
-    """재현성 지문: 하드웨어·툴체인·플래그·고정 코어·전원 상태를 모아 (dict, sha256[:16])."""
+    """재현성 지문: 하드웨어·툴체인·플래그·고정 코어·전원 상태를 모아 (dict, sha256[:16]).
+
+    키와 값은 측정 규약의 일부라 고정이다(docs/decisions.md 2026-11-12 측정 규약, 2026-11-23 통합): 같은 머신·설정이면 이전 행과 ``env_hash`` 가 같아야
+    한다. rustc·numba·halide·린트 도구의 버전(``toolchain_identity``)은 지문에 넣지 않는다 — 그 정보는 행 수준 열
+    (``compiler``·``compiler_version``·``cflags``)과 result.json 에 남긴다.
+    """
     cc = cfg.build.cc
     compilers = machine.get("compilers") if isinstance(machine.get("compilers"), dict) else {}
     cc_version = compilers.get(cc) if compilers else None
@@ -872,7 +1211,8 @@ def suggest_cores(machine: dict[str, Any], n: int) -> list[int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``--check`` / ``--probe [--write [PATH]]`` / ``--fingerprint`` / ``--env-identity`` / ``--suggest-cores N``."""
+    """``--check`` / ``--probe [--write [PATH]]`` / ``--fingerprint`` / ``--env-identity`` / ``--suggest-cores N`` /
+    ``--python-toolchain NAME`` / ``--probe-runtime {halide,numba}``."""
     parser = argparse.ArgumentParser(prog="python -m harness.protocol", description="측정 규약 검사·머신 프로브")
     parser.add_argument("--config", type=Path, default=None, help="experiment.yaml 경로")
     parser.add_argument("--check", action="store_true", help="정적+동적 규약 검사 결과를 JSON으로 출력 (플래그 있으면 exit 1)")
@@ -883,6 +1223,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-identity", action="store_true", help="(내부용) 현재 인터프리터의 python/numpy/BLAS/SDK 정체 JSON")
     parser.add_argument("--suggest-cores", type=int, default=None, metavar="N",
                         help="config/machine.yaml 에서 측정 코어 N 개를 고른다(물리 성능 코어마다 CPU 하나) → measurement.cores 후보")
+    parser.add_argument("--python-toolchain", default=None, metavar="NAME",
+                        help="(내부용) 현재 인터프리터의 numba·halide·린트 도구 정체와 오토스케줄러 NAME 의 로드 가능 여부 JSON")
+    parser.add_argument("--probe-runtime", choices=("halide", "numba"), default=None,
+                        help="(내부용) 언어의 런타임 설정을 워커와 같은 코드로 써 본다: {\"error\": null | 사유} JSON")
+    parser.add_argument("--halide-autoscheduler", default=None, help="--probe-runtime halide: 오토스케줄러 이름")
+    parser.add_argument("--halide-params", type=json.loads, default=None, help="--probe-runtime halide: 매개변수 JSON 객체")
+    parser.add_argument("--threads", type=int, default=None, help="--probe-runtime halide: 스레드 수(parallelism)")
     ns = parser.parse_args(argv)
 
     if ns.suggest_cores is not None:
@@ -896,6 +1243,14 @@ def main(argv: list[str] | None = None) -> int:
     if ns.env_identity:
         print(json.dumps(env_identity(), ensure_ascii=False))
         return 0
+    if ns.python_toolchain is not None:
+        # ASCII 로만 찍는다: 부모는 파이프를 UTF-8 로 읽는데 로캘이 UTF-8 이 아닌 플랫폼에서는 사유의 한글이 깨진다
+        print(json.dumps(python_toolchain(ns.python_toolchain)))
+        return 0
+    if ns.probe_runtime is not None:
+        error = runtime_probe(ns.probe_runtime, autoscheduler=ns.halide_autoscheduler, params=ns.halide_params, threads=ns.threads)
+        print(json.dumps({"error": error}))  # ASCII (위와 같은 이유)
+        return 0
 
     if not (ns.check or ns.probe or ns.fingerprint):
         parser.print_help()
@@ -907,14 +1262,14 @@ def main(argv: list[str] | None = None) -> int:
             cfg = load_config(ns.config)
         except ConfigError as e:
             if ns.probe and not (ns.check or ns.fingerprint):
-                print(f"{_LOG} 참고: 설정 로드 실패({e}); 프로브는 cc=gcc 로 진행", file=sys.stderr)
+                print(f"{_LOG} 참고: 설정 로드 실패({e}); 프로브는 기본값(cc={DEFAULT_CC})으로 진행", file=sys.stderr)
             else:
                 print(f"{_LOG} 설정 오류: {e}", file=sys.stderr)
                 return 2
 
     rc = 0
     if ns.probe:
-        machine = probe_machine(cc=cfg.build.cc if cfg is not None else "gcc")
+        machine = probe_machine(cfg)
         print(json.dumps(machine, ensure_ascii=False, indent=2))
         if ns.write is not None:
             out = write_machine_yaml(machine, Path(ns.write) if ns.write else None)
@@ -943,4 +1298,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # 진단은 한국어다: 파이프·파일·로캘 코드페이지 콘솔로 나갈 때 깨지지 않게 스트림을 정리한다(진입점에서만).
+    from harness.procutil import setup_stdio
+
+    setup_stdio()
     sys.exit(main())

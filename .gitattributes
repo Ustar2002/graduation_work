@@ -1,0 +1,4 @@
+# Rust 템플릿은 샘플 디렉터리로 바이트 그대로 복사된다: 체크아웃 설정(core.autocrlf)과 무관하게 LF 로 둔다.
+harness/build/rust_template/Cargo.toml text eol=lf
+harness/build/rust_template/Cargo.lock text eol=lf
+harness/build/rust_template/src/lib.rs text eol=lf

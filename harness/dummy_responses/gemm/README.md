@@ -1,7 +1,7 @@
 # gemm 더미 응답 (docs/harness_design.md §13)
 
 `provider: dummy` 일 때 `harness.llm_client` 가 API 대신 읽는 가짜 모델 응답이다.
-`<language>/<k>.md` 가 `sample_idx mod 파일 수` 번째 샘플의 응답이 된다(numpy는 5개, C는 3개).
+`<language>/<k>.md` 가 `sample_idx mod 파일 수` 번째 샘플의 응답이 된다(numpy는 5개, C는 3개, numba·halide_auto·halide_manual·rust 는 정답 1개씩).
 각 파일은 실제 응답처럼 짧은 설명 + 펜스 코드 블록 하나다.
 
 파이프라인(extract → build → check → bench)이 아래 기대표대로 분류해야 한다. 분류 규칙은 §10, 열 의미는 §11.
@@ -19,6 +19,31 @@
 | c_openmp | 0 | `#pragma omp parallel for schedule(static)` (i 루프), i-k-j, `restrict` | 없음 | 1 |
 | c_openmp | 1 | NULL 포인터 **저장** `float * volatile scratch = NULL; ... *scratch = 1.0f;` | check / runtime_crash / `signal SIGSEGV during tiny call 0` | 0 |
 | c_openmp | 2 | k 루프를 병렬화하고 공유 누산기 `sum` 에 리덕션 없이 누적 | check / race_condition / `nondeterministic:<불일치 테스트 목록>` — rect·small 은 항상 포함, tiny(K=3)는 타이밍에 따라 포함되기도 함(`nondeterministic:rect,small` 과 `nondeterministic:tiny,rect,small` 둘 다 실측됨; 아래 주의) | 0 |
+
+### 새 언어 (numba · halide_auto · halide_manual · rust)
+
+모두 정답 `0.md` 하나이고 기대는 오류 없음 — bench 까지 정상, pass = 1 이다(공통 규칙은 `harness/dummy_responses/README.md` "새 언어 더미").
+
+| language | k | 내용 | pass |
+|---|---|---|---|
+| numba | 0 | `@njit("void(float32[:, ::1], float32[:, ::1], float32[:, ::1], int64, int64, int64)", parallel=True)`: C 의 행을 `prange` 로 나누고 행마다 0 으로 지운 뒤 i-k-j 순서로 누적(안쪽 j 루프가 B·C 의 연속 행) | 1 |
+| halide_auto | 0 | 알고리즘만: `C[j, i] = 0` 뒤 RDom k 로 `C[j, i] += A[k, i] * B[j, k]`(Halide 좌표는 뒤집힘). 스케줄 호출 없음(`schedule_in_auto` 없음) | 1 |
+| halide_manual | 0 | 같은 알고리즘 + 스케줄: 순수·갱신 단계 모두 j 를 8로 split(`GuardWithIf`)해 vectorize, 행 i 를 parallel, 갱신은 k 를 j 바깥에(i-k-j) | 1 |
+| rust | 0 | C 의 행을 rayon `par_chunks_mut(n)` 로 나누고 행마다 0 으로 지운 뒤 i-k-j 순서로 누적 | 1 |
+
+### 수정 턴 응답 (`harness.repair`, docs/harness_design_v3.md §10·§14)
+
+수정 턴 t ≥ 1 의 응답은 같은 k 의 `<language>/<k>.turn<t>.md` 다. 그 파일이 없으면 `<k>.md` 를 다시 준다(같은 실패가 반복된다).
+`<k>.turn<t>.md` 는 k 를 고르는 "파일 수"에 들지 않는다(숫자 이름의 `<k>.md` 만 센다).
+
+| language | 파일 | 내용 | 턴 1 행의 기대 (error_stage / error_type / error_detail) | pass | turns_to_pass |
+|---|---|---|---|---|---|
+| c_seq | `1.turn1.md` | `1.md` 에 세미콜론만 더한 i-j-k 3중 루프(정확; 1024³ 한 번에 수 초 — 느리지만 bench 예산 안) | 없음 — 턴 0 은 build / compile_error, 턴 1 에서 통과 | 1 | 1 |
+| numpy | `2.turn1.md` | `2.md` 의 배율 1.01 을 뺀 `np.matmul(A, B, out=C)` | 없음 — 턴 0 은 check / numeric_instability, 턴 1 에서 통과 | 1 | 1 |
+
+턴 파일이 없는 실패 변형(numpy/1·4, c_seq/2, c_openmp/1·2)은 턴마다 턴 0 과 같은 응답이 와서 같은 판정이 반복된다
+(`--max-turns N` 이면 턴 N 까지 실패 행이 생기고 `turns_to_pass` 는 NA). 통과한 변형(각 언어의 0, numpy/3)은 수정 대상이 아니다
+— numpy/3 의 bench timeout 은 `pass=1` 이다.
 
 ## 변형별 주의
 

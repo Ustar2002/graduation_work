@@ -1,0 +1,57 @@
+=================================================================
+==12350==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7d2a41b61a8c at pc 0x7f65a2c0e8d4 bp 0x7f659f3fdc60 sp 0x7f659f3fdc58
+READ of size 4 at 0x7d2a41b61a8c thread T2
+    #0 0x7f65a2c0e8d3 in scan._omp_fn.0 /home/ustar/dev/graduate_project/results/built/san-check/scan/c_openmp/args-positional_hint-off_fb-compiler/sample_2/san/kernel.c:21
+    #1 0x7f65a3a2d48d in gomp_thread_start ../../../src/libgomp/team.c:129
+    #2 0x7f65a4f2a1a3 in asan_thread_start ../../../../src/libsanitizer/asan/asan_interceptors.cpp:234
+    #3 0x7f65a449caa3 in start_thread nptl/pthread_create.c:447
+    #4 0x7f65a4529c3b in clone3 ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+0x7d2a41b61a8c is located 0 bytes after 400012-byte region [0x7d2a41b00000,0x7d2a41b61a8c)
+allocated by thread T0 here:
+    #0 0x7f65a4f1f9c7 in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:67
+    #1 0x7f65a2c0e31b in scan /home/ustar/dev/graduate_project/results/built/san-check/scan/c_openmp/args-positional_hint-off_fb-compiler/sample_2/san/kernel.c:11
+    #2 0x7f65a421bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f65a421840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #4 0x7f65a421b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+Thread T2 created by T0 here:
+    #0 0x7f65a4f171f1 in pthread_create ../../../../src/libsanitizer/asan/asan_interceptors.cpp:245
+    #1 0x7f65a3a2dc3f in gomp_team_start ../../../src/libgomp/team.c:859
+    #2 0x7f65a3a22f95 in GOMP_parallel ../../../src/libgomp/parallel.c:176
+    #3 0x7f65a2c0e3d2 in scan /home/ustar/dev/graduate_project/results/built/san-check/scan/c_openmp/args-positional_hint-off_fb-compiler/sample_2/san/kernel.c:14
+    #4 0x7f65a421bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow /home/ustar/dev/graduate_project/results/built/san-check/scan/c_openmp/args-positional_hint-off_fb-compiler/sample_2/san/kernel.c:21 in scan._omp_fn.0
+Shadow bytes around the buggy address:
+  0x7d2a41b61800: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d2a41b61880: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d2a41b61900: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d2a41b61980: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d2a41b61a00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7d2a41b61a80: 00[04]fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d2a41b61b00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d2a41b61b80: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d2a41b61c00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d2a41b61c80: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d2a41b61d00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==12350==ABORTING

@@ -1,0 +1,23 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "M": 1024,
+    "N": 1024,
+    "K": 1024
+  },
+  "inspect": {
+    "loop_nest": "produce A_im:\n  parallel _0.v10.v10.v10:\n    for _0.v10.v10.v12 in [0, 4127]:\n      vectorized _0.v11 in [0, 7]:\n        A_im(...) = ...\nconsume A_im:\n  produce B_im:\n    parallel _0.v7.v7.v7:\n      for _0.v7.v7.v9 in [0, 4127]:\n        vectorized _0.v8 in [0, 7]:\n          B_im(...) = ...\n  consume B_im:\n    produce C:\n      parallel j.v1.v1.v1:\n        for j.v1.v1.v3 in [0, 4127]:\n          vectorized j.v2 in [0, 7]:\n            C(...) = ...\n      parallel j.v4.v4.v4:\n        for j.v4.v4.v6 in [0, 4127]:\n          vectorized j.v5 in [0, 7]:\n            for k in [0, 1023]:\n              C(...) = ...\n",
+    "schedule_source": "C.compute_root()\n    .split(j,v1,v2,8,ShiftInwards)\n    .fuse(v1,i,v1)\n    .reorder(v2,v1)\n    .parallel(v1,4128,ShiftInwards)\n    .vectorize(v2)\n;\nC.update(0)\n    .split(j,v4,v5,8,GuardWithIf)\n    .fuse(v4,i,v4)\n    .reorder(v5,v4)\n    .parallel(v4,4128,GuardWithIf)\n    .vectorize(v5)\n;\nB_im.compute_root()\n    .split(_0,v7,v8,8,ShiftInwards)\n    .fuse(v7,_1,v7)\n    .reorder(v8,v7)\n    .parallel(v7,4128,ShiftInwards)\n    .vectorize(v8)\n;\nA_im.compute_root()\n    .split(_0,v10,v11,8,ShiftInwards)\n    .fuse(v10,_1,v10)\n    .reorder(v11,v10)\n    .parallel(v10,4128,ShiftInwards)\n    .vectorize(v11)\n;\n",
+    "autoscheduler": "Li2018",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 0.395,
+    "jit_ms": 1208.817,
+    "dims": {
+      "M": 1024,
+      "N": 1024,
+      "K": 1024
+    },
+    "ignored_schedule_calls": []
+  }
+}

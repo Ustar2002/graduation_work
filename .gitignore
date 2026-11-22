@@ -3,6 +3,8 @@ results/raw/*
 results/built/*
 !results/raw/.gitkeep
 !results/built/.gitkeep
+# 그래프는 analysis/plots.py 로 다시 만든다
+results/plots/
 # 시드 고정 테스트 입력은 gen_tests.py로 재생성한다
 tasks/*/tests/*.npz
 tasks/*/tests/manifest.json
@@ -15,6 +17,13 @@ __pycache__/
 *.so
 *.egg-info/
 .pytest_cache/
+# 개발용 Windows venv 와 Windows 산출물(공유 라이브러리·확장 모듈) — 측정은 Linux 의 .venv 로만 한다
+.venv-win/
+*.dll
+*.pyd
+# Rust(cargo) 빌드 디렉터리: 결과·빌드 템플릿 아래
+results/**/target/
+harness/build/**/target/
 # 편집기·OS
 .vscode/
 .idea/

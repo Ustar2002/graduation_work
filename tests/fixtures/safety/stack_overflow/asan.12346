@@ -1,0 +1,54 @@
+=================================================================
+==12346==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7ffd5e2c1440 at pc 0x7f3b9de0e5b7 bp 0x7ffd5e2c0fd0 sp 0x7ffd5e2c0fc8
+WRITE of size 4 at 0x7ffd5e2c1440 thread T0
+    #0 0x7f3b9de0e5b6 in histogram kernel.c:9
+    #1 0x7f3b9f21bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f3b9f21840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f3b9f21b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #4 0x7f3b9f24d2c8 in _ctypes_callproc (/usr/lib/python3.14/lib-dynload/_ctypes.cpython-314-x86_64-linux-gnu.so+0x152c8) (BuildId: 9c1f0e6b7a8d4c35b2a1908f7e6d5c4b3a291807)
+    #5 0x5a3d6c1e4a2c in _PyObject_MakeTpCall (/usr/bin/python3.14+0x1e4a2c) (BuildId: 4b7e1d9a0c3f5e6872a1b0c9d8e7f6a5b4c3d2e1)
+    #6 0x5a3d6c2f8d31 in _PyEval_EvalFrameDefault (/usr/bin/python3.14+0x2f8d31) (BuildId: 4b7e1d9a0c3f5e6872a1b0c9d8e7f6a5b4c3d2e1)
+    #7 0x7f3b9fc2a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #8 0x7f3b9fc2a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #9 0x5a3d6c3e8964 in _start (/usr/bin/python3.14+0x3e8964) (BuildId: 4b7e1d9a0c3f5e6872a1b0c9d8e7f6a5b4c3d2e1)
+
+Address 0x7ffd5e2c1440 is located in stack of thread T0 at offset 1072 in frame
+    #0 0x7f3b9de0e1e8 in histogram kernel.c:4
+
+  This frame has 1 object(s):
+    [48, 1072) 'local' (line 5) <== Memory access at offset 1072 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow kernel.c:9 in histogram
+Shadow bytes around the buggy address:
+  0x7ffd5e2c1180: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1200: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1280: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1300: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1380: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7ffd5e2c1400: 00 00 00 00 00 00 00 00[f3]f3 f3 f3 f3 f3 f3 f3
+  0x7ffd5e2c1480: f3 f3 f3 f3 f3 f3 f3 f3 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1500: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1580: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1600: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffd5e2c1680: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==12346==ABORTING
