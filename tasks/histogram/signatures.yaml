@@ -1,0 +1,14 @@
+# histogram 과제 시그니처 (기계 판독 부분은 harness/taskspec.py). 언어별 시그니처·매개변수 설명은 harness/sigs.py 가
+# args 에서 만든다(languages 절 없음). doc 는 프롬프트의 매개변수 설명에 그대로 붙는 영어 구절이다.
+task: histogram
+function: histogram
+params: [keys, hist, n, n_bins]
+args:
+  - {name: keys, kind: in,  dtype: int32, shape: [n], doc: "each value is in the range 0 <= keys[i] < n_bins"}
+  - {name: hist, kind: out, dtype: int32, shape: [n_bins]}
+  # n_bins 는 출력 hist 의 형태에만 나온다. halide 빌드 함수에는 출력 인자가 없어 기본 문구("… the array shapes above")가
+  # 맞지 않으므로 두 스칼라 모두 무엇의 길이인지 직접 적는다.
+  - {name: n, kind: dim, doc: "the number of keys, always equal to the length of `keys`"}
+  - {name: n_bins, kind: dim, doc: "the number of bins, always equal to the length of `hist`"}
+# work 는 두지 않는다: 부동소수 연산이 없는 정수 커널이라 gflops 는 NA 로 남긴다(정수 증가 횟수를 넣으면 gflops 열의 단위가 섞인다).
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}

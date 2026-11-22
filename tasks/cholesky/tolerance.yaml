@@ -1,0 +1,12 @@
+# cholesky 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float32 입력을 float64 로 올려 분해한 하삼각 인자; 대각 위는 0).
+# 실측(2026-11-21, 형태 4·97·256·2048, numpy float32 로 흉내 낸 구현 7종): 최대 절대오차 2.4e-6(순차 right-looking, n=2048 의 대각),
+# 이 허용오차에 대한 최대 비율 0.019 → 여유 52배. 재측정(2026-11-22, 8종: right-looking 비FMA·FMA·역수 곱, left-looking 순차
+# float32·float64 누적·BLAS 내적, 64블록, np.linalg float32): 최대 2.38e-6·비율 0.0194 로 같다(나머지는 비율 0.0023 이하). 설계 표의 제안값(rtol 1e-3, atol 1e-4)은 여유가 516배지만 보정 없는 12비트
+# 근사 역제곱근(오차 4.2e-4)·반정밀도로 반올림한 출력(4.9e-4)이 비율 0.27–0.40 으로 통과한다 → 10배 조였다(docs/decisions.md).
+task: cholesky
+dtype: float32
+rtol: 1.0e-4
+atol: 1.0e-5                   # 대각 아래 원소는 n 이 크면 0 근처(n=2048 에서 중앙값 0.004)라 절대 항이 판정을 정한다
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20
+sentinel: -2048.0              # 출력 사전 채움값. |L_ij| ≤ sqrt(A_ii) < 1.5 이므로 정당한 값이 될 수 없음

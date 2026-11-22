@@ -1,0 +1,9 @@
+# nbody 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| (ref 는 float64 로 모든 쌍을 더한 가속도).
+task: nbody
+dtype: float32
+rtol: 1.0e-4                   # 실측(2026-11-22, 네 형태, numpy float32 흉내; 비율 = max|err|/(atol+rtol·|ref|)):
+atol: 1.0e-4                   #   순차 누적 ≤ 0.036, pairwise·8-레인 누적 ≤ 0.007, 근사 rsqrt(±3.66e-4)+뉴턴 1회 ≤ 0.038 → 여유 26 배 이상.
+                               #   근사 rsqrt 만(정제 없음)은 ≥ 3.96(tiny) ~ 16(small) 로 분명히 실패. rtol 1e-3 이면 tiny 에서 0.90 으로 경계라 쓰지 않는다
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20
+sentinel: -2048.0              # 출력 사전 채움값. 가속도는 O(1)(gen_tests 가 |acc| < 100 을 확인)이라 정당한 값이 될 수 없음

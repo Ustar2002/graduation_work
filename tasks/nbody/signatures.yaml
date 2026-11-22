@@ -1,0 +1,14 @@
+# nbody 과제 시그니처 (기계 판독 부분은 harness/taskspec.py). 언어별 시그니처·매개변수 설명은 harness/sigs.py 가
+# args 에서 만든다(languages 절 없음). doc 는 프롬프트의 매개변수 설명에 그대로 붙는 영어 구절이다.
+task: nbody
+function: nbody
+params: [pos, mass, acc, n]
+args:
+  - {name: pos,  kind: in,  dtype: float32, shape: [n, 3], doc: "row i holds the coordinates (x, y, z) of particle i"}
+  - {name: mass, kind: in,  dtype: float32, shape: [n],    doc: "mass[j] is the mass of particle j"}
+  - {name: acc,  kind: out, dtype: float32, shape: [n, 3], doc: "row i receives the acceleration (ax, ay, az) of particle i"}
+  - {name: n, kind: dim, doc: "the number of particles, always consistent with the array shapes above"}
+# 쌍 하나의 부동소수 연산 수 20(뺄셈 3, r² 의 곱셈 3·덧셈 3, 제곱근 1, 나눗셈 1, 세제곱 곱셈 2, 질량 곱셈 1, 누적의 곱셈 3·덧셈 3).
+# 직접 합 N-body 에서 관례로 쓰는 값이다(gflops 계산용).
+work: "20*n*n"
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}

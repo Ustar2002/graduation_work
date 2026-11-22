@@ -1,0 +1,39 @@
+0 0x7f12f8b1f9c7 in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:67
+    #1 0x7f12f6a0e25a in gemm kernel.c:7
+    #2 0x7f12f7e1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f12f7e1840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #4 0x7f12f7e1b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow kernel.c:12 in gemm
+Shadow bytes around the buggy address:
+  0x7bb0f3ddfe00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3ddfe80: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3ddff00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3ddff80: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3de0000: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7bb0f3de0080: 00[04]fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3de0100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3de0180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3de0200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3de0280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bb0f3de0300: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==12345==ABORTING

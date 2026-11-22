@@ -1,0 +1,5 @@
+# sort 판정: 정확 비교(정수 출력; 설계 v3 §2.2). 원소가 전부 같아야 통과한다(rtol/atol 없음).
+task: sort
+dtype: int32
+compare: exact
+sentinel: -2048                # 출력 사전 채움값. 키는 int32 전체 범위라 이 값도 키가 될 수 있으므로 gen_tests 가 입력에서 뺀다(확인 포함)

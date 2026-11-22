@@ -462,7 +462,10 @@ def read_rows(csv_path: Path) -> list[dict[str, str]]:
 
 
 def read_result_rows(built_dir: Path) -> list[RunRow]:
-    """built 디렉터리 아래 모든 ``result.json`` 의 최상위 ``"row"`` 를 ``RunRow`` 로 읽는다."""
+    """built 디렉터리 아래 모든 ``result.json`` 의 최상위 ``"row"`` 를 ``RunRow`` 로 읽는다.
+
+    깊이와 무관하게 찾는다: 수정 턴의 ``sample_<i>/turn_<t>/result.json`` (설계 v3 §9.4)도 턴 0 의 것과 같이 읽힌다.
+    """
     built_dir = Path(built_dir)
     out: list[RunRow] = []
     if not built_dir.exists():
@@ -483,28 +486,47 @@ def read_result_rows(built_dir: Path) -> list[RunRow]:
     return out
 
 
-def rebuild_csv(built_dir: Path, csv_path: Path, *, providers: Iterable[str] | None = None) -> int:
+def rebuild_csv(built_dir: Path, csv_path: Path, *, providers: Iterable[str] | None = None,
+                exclude_providers: Iterable[str] | None = None) -> int:
     """built 디렉터리의 모든 ``result.json`` 에서 CSV를 다시 쓴다. 쓴 행 수를 돌려준다.
 
-    ``providers`` 가 주어지면 그 provider의 행만 넣는다(dummy/실제 CSV 분리용).
+    ``providers`` 가 주어지면 그 provider의 행만, ``exclude_providers`` 가 주어지면 그 provider 가 아닌 행만 넣는다
+    (dummy/실제 CSV 분리용). 다시 만들 수 없는 행은 버리지 않는다: 기존 CSV 의 행 중 같은 키의 result.json 이 없는 것
+    (built 디렉터리를 지웠거나 다른 머신에서 만든 행)은 같은 provider 필터를 거쳐 그대로 남는다. result.json 은 그것이
+    있는 행에 대해서만 원본이다. 넣을 행이 하나도 없으면 파일을 건드리지 않는다.
     """
     allowed = set(providers) if providers is not None else None
+    excluded = set(exclude_providers or ())
+
+    def keep(provider: str | None) -> bool:
+        p = provider or ""
+        return (allowed is None or p in allowed) and p not in excluded
+
     rows = read_result_rows(Path(built_dir))
-    csv_rows = [r.to_csv_dict() for r in rows if allowed is None or (r.provider or "") in allowed]
-    deduped = dedupe_rows(csv_rows, where=f"(rebuild {built_dir})")
+    csv_rows = dedupe_rows([r.to_csv_dict() for r in rows if keep(r.provider)], where=f"(rebuild {built_dir})")
+    rebuilt_keys = {row_key_of(r) for r in csv_rows}
+    header, existing = _read_csv_raw(Path(csv_path))
+    if header is not None and header != COLUMNS:
+        missing = [c for c in COLUMNS if c not in header]
+        extra = [c for c in header if c not in COLUMNS]
+        print(f"{_LOG} 경고: {csv_path} 의 헤더가 스키마와 다르다 — result.json 이 없는 기존 행은 열 이름으로 옮긴다 "
+              f"(없는 열 {missing} 은 NA, 버려지는 열 {extra})", file=sys.stderr)
+    kept = [r for r in existing if row_key_of(r) not in rebuilt_keys and keep(r.get("provider"))]
+    if not csv_rows and not kept and header in (None, COLUMNS):
+        print(f"{_LOG} {csv_path}: 넣을 행이 없어 그대로 둔다 (result.json {len(rows)}개)", file=sys.stderr)
+        return 0
+    deduped = dedupe_rows([*csv_rows, *kept], where=f"(rebuild {csv_path})")
     deduped.sort(key=lambda r: (_created_at_sort_key(r.get("created_at")), row_key_of(r)))
     _write_csv_atomic(Path(csv_path), deduped)
-    print(f"{_LOG} {csv_path}: {len(deduped)}행 재생성 (result.json {len(rows)}개)", file=sys.stderr)
+    print(f"{_LOG} {csv_path}: {len(deduped)}행 재생성 (result.json {len(rows)}개; result.json 이 없어 기존 CSV 에서 유지한 행 "
+          f"{len({row_key_of(r) for r in kept})}개)", file=sys.stderr)
     return len(deduped)
 
 
 def rebuild_csvs(built_dir: Path, results_csv: Path, results_csv_dummy: Path) -> dict[str, int]:
-    """provider==dummy 행은 ``results_csv_dummy`` 로, 나머지는 ``results_csv`` 로 나눠 재생성한다."""
-    rows = read_result_rows(Path(built_dir))
-    providers = {r.provider or "" for r in rows}
-    real = providers - {"dummy"}
+    """provider==dummy 행은 ``results_csv_dummy`` 로, 나머지는 ``results_csv`` 로 나눠 재생성한다(``rebuild_csv``)."""
     return {
-        str(results_csv): rebuild_csv(built_dir, results_csv, providers=real),
+        str(results_csv): rebuild_csv(built_dir, results_csv, exclude_providers={"dummy"}),
         str(results_csv_dummy): rebuild_csv(built_dir, results_csv_dummy, providers={"dummy"}),
     }
 
@@ -513,18 +535,25 @@ def rebuild_csvs(built_dir: Path, results_csv: Path, results_csv_dummy: Path) ->
 
 
 def _source_files() -> list[Path]:
-    """harness_version 해시 대상 파일(정렬, 결정적)."""
+    """harness_version 해시 대상 파일(정렬, 결정적).
+
+    결과 행의 값을 바꿀 수 있는 것들이다: 하네스·분석 코드, 프롬프트, 모든 과제의 명세·시그니처·허용오차, 실험 설정,
+    린트 플러그인과 그 규칙 표(``lint_*`` 열과 ``compiler+lint`` 피드백이 여기에 달려 있다; 설계 v3 §10.4).
+    """
     files: list[Path] = []
     files += sorted(p for p in ROOT.glob("harness/**/*.py") if "__pycache__" not in p.parts)
     files += sorted(ROOT.glob("analysis/*.py"))
     files += sorted(p for p in ROOT.glob("prompts/**/*") if p.is_file())
     files += [p for name in ("spec.md", "signatures.yaml", "tolerance.yaml") for p in sorted((ROOT / "tasks").glob(f"*/{name}"))]
     files += [ROOT / "config" / "experiment.yaml"]
+    files += [ROOT / "plugins" / "lint" / name for name in ("run_lint.py", "rules.yaml")]
+    # Rust 빌드 템플릿: release 프로필(opt-level·lto·codegen-units)과 rayon 버전을 정한다(rust 행의 성능을 바꾼다)
+    files += [ROOT / "harness" / "build" / "rust_template" / name for name in ("Cargo.toml", "Cargo.lock")]
     return [p for p in files if p.is_file()]
 
 
 def source_hash() -> str:
-    """하네스 소스(설계 §11 목록)의 sha256[:12]. 경로와 내용을 함께 섞는다."""
+    """하네스 소스(``_source_files``)의 sha256[:12]. 경로와 내용을 함께 섞는다."""
     h = hashlib.sha256()
     for p in _source_files():
         h.update(str(p.relative_to(ROOT)).encode("utf-8"))

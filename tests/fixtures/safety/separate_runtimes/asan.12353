@@ -1,0 +1,21 @@
+=================================================================
+==12353==ERROR: AddressSanitizer: attempting double-free on 0x7b8e5c9e0040 in thread T0:
+    #0 0x7f4c1b51f5f8 in free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:51
+    #1 0x7f4c19a0e4b2 in cholesky kernel.c:38
+    #2 0x7f4c1ae1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f4c1ae1840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #4 0x7f4c1ae1b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+0x7b8e5c9e0040 is located 0 bytes inside of 64-byte region [0x7b8e5c9e0040,0x7b8e5c9e0080)
+freed by thread T0 here:
+    #0 0x7f4c1b51f5f8 in free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:51
+    #1 0x7f4c19a0e49a in cholesky kernel.c:35
+    #2 0x7f4c1ae1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+previously allocated by thread T0 here:
+    #0 0x7f4c1b51f9c7 in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:67
+    #1 0x7f4c19a0e213 in cholesky kernel.c:9
+    #2 0x7f4c1ae1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+SUMMARY: AddressSanitizer: double-free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:51 in free
+==12353==ABORTING

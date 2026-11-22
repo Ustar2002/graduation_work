@@ -1,0 +1,31 @@
+{
+  "_comment": "M2a 프롬프트 해시 기준값(2026-11-21, 변경 전 템플릿·저장소의 config/machine.yaml 로 렌더링). 기존 4개 과제 × 3개 언어 × positional·hint off 의 prompt_hash 는 이 값과 같아야 한다(설계 v3 §9.1).",
+  "hashes": {
+    "gemm/numpy": "7bfb18295ead08a1",
+    "gemm/c_seq": "fb61262a2a9fa4a6",
+    "gemm/c_openmp": "4233d9588102f8f5",
+    "jacobi2d/numpy": "5d43516b708c0985",
+    "jacobi2d/c_seq": "dd9f5c35ba8f200c",
+    "jacobi2d/c_openmp": "39fdeaa8cebaddcb",
+    "spmv_csr/numpy": "209f79cf91d96d94",
+    "spmv_csr/c_seq": "485431566f98c0ac",
+    "spmv_csr/c_openmp": "0ff16081c16b394f",
+    "dot/numpy": "a7f3fdaf66db72ff",
+    "dot/c_seq": "b901f2f282fc9953",
+    "dot/c_openmp": "d17af18454a135bd"
+  },
+  "user_sha256": {
+    "gemm/numpy": "e301c0df6d3dda508957d467a4b696d1566cb886ae685600a66c6b3bca8fcd9b",
+    "gemm/c_seq": "f327a8a6b75abf6fab570405d7404815bf118a828be4673a2fb814e5b752ee79",
+    "gemm/c_openmp": "0c066403bdaf62b0ffeae02f81c90fe8a230d72aee041491ae4ef455a54ddb98",
+    "jacobi2d/numpy": "5fc6455e8372d81479dc0816c3bb9a4cb07c5f4d6c3b460398b5887329bb7dfe",
+    "jacobi2d/c_seq": "7514818d451ef7775638836c11af0b152de5e5663cebe326e942532c703668c0",
+    "jacobi2d/c_openmp": "85a8b0e7cdfb894b4f2a88a6f899bd12615d22b34bc6d619170fcdd7c9d1cf30",
+    "spmv_csr/numpy": "e2a60aac538c179dda3c979db194618e8d3ff2fe68d0487a0a7158fca174107f",
+    "spmv_csr/c_seq": "82ff1dbca781adc0f39a82e726ff34aec42e7f0c54004d9011aac2eb72c15af1",
+    "spmv_csr/c_openmp": "28bc98d3d7ca0f1408f481328b53749da0dda493f9a46496c1b586483adfe573",
+    "dot/numpy": "37964de613645c574042f75d6dcc1aa0fd003296f0c875638744287dc7be0772",
+    "dot/c_seq": "dce65060073aaf1b81fd77e7f7de101572b26cf4116e053bd9ca1965e78b6035",
+    "dot/c_openmp": "e130475baf1a952b32f241b57ed68cbaa7dc78867834df9fcb0dcfff5ceb9031"
+  }
+}

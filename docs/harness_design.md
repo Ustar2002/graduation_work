@@ -4,6 +4,16 @@ v1 2026-11-03 → v2 2026-11-04 (5개 관점의 적대적 설계 리뷰 반영) 
 `CLAUDE.md`의 M1을 구현하는 모든 모듈이 지키는 인터페이스·규약이다. 이 문서와 `CLAUDE.md`가 충돌하면 `CLAUDE.md`가 우선하되 충돌은 `docs/decisions.md`에 적는다.
 구현자는 자기 파일 밖의 계약(함수 시그니처, JSON 키, CSV 열, CLI 옵션)을 바꾸지 않는다. 바꿔야 하면 이 문서를 먼저 고치고 `docs/decisions.md`에 날짜와 함께 적는다.
 
+> **2026-11-22 이후 달라진 것.** 이 문서는 M1 시점의 계약이다. M2b–M6 구현과 리뷰 반영으로 아래 항목이 달라졌고, 그 항목은 `docs/harness_design_v3.md`(특히 §16)와 `docs/decisions.md` 2026-11-22 절이 우선한다.
+> - 대응 기준선 문서는 `baseline/paired_sample_<lang>_<i>.json` 이 아니라 그 샘플(턴) 디렉터리의 `paired_baseline.json` 이다.
+> - 심벌 검사(`nm -D --defined-only`)는 타입 T·W 에 더해 i(GNU 간접 함수: `target_clones`·`ifunc`)를 받는다.
+> - C 시그니처 검사는 ABI 가 같은 표기(`signed`, `signed int`, `int32_t` = `int`)를 받고 `signature_exact=False` 로 남긴다. 전처리에 쓰는 컴파일러는 설정의 `build.cc` 다.
+> - 건너뜀 규칙: `raw_sha256` 이 같아도 `--skip-bench` 로 쓴 통과 행은 bench 를 요청한 run 에서 다시 처리한다. safety·lint 만 빠진 결과는 알리고 건너뛴다.
+> - 행의 `run_id` 는 처리 중인 run 디렉터리의 이름이다(raw 안의 값이 다르면 `result.json` 의 `raw_run_id` 에 남긴다).
+> - `finish_run` 의 드리프트·`model_served` 보정은 그 run 의 모든 `result.json` 행으로 한다(필터로 돈 호출도 같다).
+> - `--rebuild-csv` 는 `result.json` 으로 다시 만들 수 없는 기존 CSV 행을 지우지 않는다.
+> - 도구 점검(exit 7)에 실행 접두(taskset)·Rust 툴체인·Halide 오토스케줄러 매개변수·Numba 스레딩 계층을 한 번씩 돌려 보는 단계가 더해졌다.
+
 ## 0. 실험 머신 실측 (2026-11-03/04)
 
 | 항목 | 값 |

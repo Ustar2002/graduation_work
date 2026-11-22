@@ -1,0 +1,17 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "H": 4096,
+    "W": 4096,
+    "T": 4
+  },
+  "inspect": {
+    "loop_nest": "produce step3:\n  parallel y.y_o:\n    for x.x_o:\n      produce step0:\n        for y:\n          for x.x_vo in [0, 32]:\n            vectorized x.x_vi in [0, 7]:\n              step0(...) = ...\n      consume step0:\n        produce step1:\n          for y:\n            for x.x_vo in [0, 32]:\n              vectorized x.x_vi in [0, 7]:\n                step1(...) = ...\n        consume step1:\n          produce step2:\n            for y:\n              for x.x_vo in [0, 32]:\n                vectorized x.x_vi in [0, 7]:\n                  step2(...) = ...\n          consume step2:\n            for y.y_i in [0, 255]:\n              for x.x_i.x_i_vo in [0, 31]:\n                vectorized x.x_i.x_i_vi in [0, 7]:\n                  step3(...) = ...\n",
+    "schedule_source": "Var x_i(\"x_i\");\nVar x_i_vi(\"x_i_vi\");\nVar x_i_vo(\"x_i_vo\");\nVar x_o(\"x_o\");\nVar x_vi(\"x_vi\");\nVar x_vo(\"x_vo\");\nVar y_i(\"y_i\");\nVar y_o(\"y_o\");\n\nFunc step0 = pipeline.get_func(2);\nFunc step1 = pipeline.get_func(3);\nFunc step2 = pipeline.get_func(4);\nFunc step3 = pipeline.get_func(5);\n\n{\n    Var x = step0.args()[0];\n    step0\n        .compute_at(step3, x_o)\n        .split(x, x_vo, x_vi, 8)\n        .vectorize(x_vi);\n}\n{\n    Var x = step1.args()[0];\n    step1\n        .compute_at(step3, x_o)\n        .split(x, x_vo, x_vi, 8)\n        .vectorize(x_vi);\n}\n{\n    Var x = step2.args()[0];\n    step2\n        .compute_at(step3, x_o)\n        .split(x, x_vo, x_vi, 8)\n        .vectorize(x_vi);\n}\n{\n    Var x = step3.args()[0];\n    Var y = step3.args()[1];\n    step3\n        .compute_root()\n        .split(x, x_o, x_i, 256)\n        .split(y, y_o, y_i, 256)\n        .reorder(x_i, y_i, x_o, y_o)\n        .split(x_i, x_i_vo, x_i_vi, 8)\n        .vectorize(x_i_vi)\n        .parallel(y_o);\n}\n\n",
+    "autoscheduler": "Mullapudi2016",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 624.424,
+    "jit_ms": 980.089
+  }
+}

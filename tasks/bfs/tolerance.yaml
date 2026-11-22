@@ -1,0 +1,5 @@
+# bfs 허용오차: 정수 출력 → 정확 비교(모든 원소가 참조와 같아야 통과; rtol·atol 없음). 참조는 int32.
+task: bfs
+dtype: int32
+compare: exact
+sentinel: -2048                # 출력 사전 채움값. 정당한 출력은 -1(도달 불가) 또는 0 이상이므로 이 값이 될 수 없다

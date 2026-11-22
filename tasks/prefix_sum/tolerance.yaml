@@ -1,0 +1,5 @@
+# prefix_sum 판정: 정확 비교(정수 출력; 설계 v3 §2.2). 원소가 전부 같아야 통과한다(rtol/atol 없음).
+task: prefix_sum
+dtype: int32
+compare: exact
+sentinel: -2048                # 출력 사전 채움값. 입력이 0 이상이라 누적 합도 0 이상이므로 정당한 값이 될 수 없다(gen_tests 가 확인)

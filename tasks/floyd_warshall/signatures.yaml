@@ -1,0 +1,11 @@
+# floyd_warshall 과제 시그니처 (기계 판독 부분은 harness/taskspec.py). 언어별 시그니처·매개변수 설명은 harness/sigs.py 가 args 에서
+# 만든다(languages 절 없음). doc 는 프롬프트의 매개변수 설명에 그대로 들어가는 영어 구절이다 — 바꾸면 prompt_hash 가 바뀐다.
+task: floyd_warshall
+function: floyd_warshall
+params: [W, D, n]
+args:
+  - {name: W, kind: in,  dtype: float32, shape: [n, n], doc: "the element in row i and column j is the weight of the edge from vertex i to vertex j; the diagonal is 0 and every other element is positive and finite"}
+  - {name: D, kind: out, dtype: float32, shape: [n, n], doc: "the element in row i and column j is the length of a shortest path from vertex i to vertex j; the diagonal is 0"}
+  - {name: n, kind: dim}
+work: "2*n**3"                         # (k, i, j) 마다 덧셈 1 + 최솟값 1; gflops 계산용
+baseline: {backend: c, file: baseline/baseline.c, openmp: true}

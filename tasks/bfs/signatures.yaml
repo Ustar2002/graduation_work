@@ -1,0 +1,17 @@
+# bfs 과제 시그니처 (기계 판독 부분은 harness/taskspec.py). 언어별 시그니처·매개변수 설명은 harness/sigs.py 가 args 에서
+# 만든다(languages 절 없음). doc 구절은 프롬프트의 매개변수 설명에 그대로 들어가므로 영어로, spec.md 와 같은 사실만 적는다.
+task: bfs
+function: bfs
+params: [row_ptr, col_idx, dist, n_vertices, n_edges, source]
+args:
+  - {name: row_ptr, kind: in,  dtype: int32, shape: ["n_vertices + 1"], doc: "the out-neighbours of vertex u are col_idx[p] for row_ptr[u] <= p < row_ptr[u+1]"}
+  - {name: col_idx, kind: in,  dtype: int32, shape: [n_edges], doc: "each value is a vertex number, 0 <= col_idx[p] < n_vertices"}
+  - {name: dist,    kind: out, dtype: int32, shape: [n_vertices], doc: "dist[v] is the minimum number of edges on a path from source to v, or -1 if v is not reachable from source; dist[source] is 0"}
+  - {name: n_vertices, kind: dim}
+  - {name: n_edges, kind: dim}
+  - {name: source, kind: dim, doc: "the vertex from which the distances are measured, 0 <= source < n_vertices"}
+# work 없음: 부동소수 연산이 없는 커널이라 gflops 를 정의하지 않는다.
+baseline: {backend: c, file: baseline/baseline.c, openmp: false}   # 순차 C, 배열 큐 (설계 v3 §4)
+unsupported:
+  halide_auto: "data-dependent control flow (frontier expansion over a CSR graph) is not expressible as a Halide pipeline"
+  halide_manual: "data-dependent control flow (frontier expansion over a CSR graph) is not expressible as a Halide pipeline"

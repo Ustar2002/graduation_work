@@ -2,16 +2,22 @@
 
 임포트 검사는 하지 않는다(오케스트레이터는 LLM 코드를 실행하지 않는다 — 워커 ``--mode import`` 가 한다, §8).
 구문 오류 → ``error_kind="compile_error"``, ``error_detail="SyntaxError: ..."``. artifact = ``kernel.py``.
+
+파이썬 소스를 쓰는 다른 백엔드(``harness.build.numba``, ``harness.build.halide``; 설계 v3 §6)도 ``build_python_source`` 로
+같은 저장·구문 검사를 하고, 그 위에 AST 검사(``inspect``)의 판정과 관찰값(``BuildResult.extra``)을 얹는다.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.metadata
 import json
 import platform
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 from harness.build.c import BUILD_JSON, BuildResult
 from harness.paths import atomic_write_json
@@ -21,19 +27,69 @@ _LOG = "[build.python]"
 KERNEL_PY = "kernel.py"
 COMPILER_NAME = "python"
 
+# AST 검사: 구문 트리 → (error_kind, error_detail, extra). 통과면 error_kind == "".
+Inspector = Callable[[ast.Module], tuple[str, str, dict[str, Any]]]
 
-def build_python(code: str, out_dir: Path) -> BuildResult:
-    """``out_dir/kernel.py`` 를 쓰고 ``compile(code, "kernel.py", "exec")`` 로 구문만 검사한다. ``build.json`` 도 저장."""
+
+def package_version(dist: str) -> str:
+    """설치된 배포판의 버전(임포트 없이 메타데이터만 읽는다). 없으면 ``""``."""
+    try:
+        return importlib.metadata.version(dist)
+    except importlib.metadata.PackageNotFoundError:
+        return ""
+
+
+def imported_names(tree: ast.Module) -> dict[str, str]:
+    """임포트로 묶인 이름 → 전체 이름: ``import numpy as np`` → ``{"np": "numpy"}``,
+    ``from numba import njit`` → ``{"njit": "numba.njit"}``. ``from m import *`` 는 이름을 묶지 않는 것으로 본다."""
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                out[alias.asname or top] = alias.name if alias.asname else top
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                if alias.name != "*":
+                    out[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return out
+
+
+def dotted_name(node: ast.AST) -> list[str] | None:
+    """``nb.njit`` → ``["nb", "njit"]``, ``njit`` → ``["njit"]``. 이름과 속성 접근만으로 된 식이 아니면 None."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return parts[::-1]
+
+
+def top_level_function(tree: ast.Module, function: str) -> ast.FunctionDef | None:
+    """최상위 ``def {function}``. 같은 이름이 여러 번이면 마지막 정의가 유효하다(파이썬 의미론). ``async def`` 는 치지 않는다."""
+    found: ast.FunctionDef | None = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            found = node
+    return found
+
+
+def build_python_source(
+    code: str, out_dir: Path, *, compiler: str, compiler_version: str, inspect: Inspector | None = None
+) -> BuildResult:
+    """``out_dir/kernel.py`` 를 쓰고 ``compile(code, "kernel.py", "exec")`` 로 구문을 검사한 뒤, 통과하면 ``inspect`` (AST 검사)의
+    판정과 관찰값을 더한다. ``build.json`` 도 저장한다. 코드는 실행하지 않는다."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact = out_dir / KERNEL_PY
     artifact.write_text(code if code.endswith("\n") else code + "\n", encoding="utf-8")
 
-    cc_version = platform.python_version()
     t0 = time.perf_counter()
     error_kind = ""
     error_detail = ""
-    log = ""
+    extra: dict[str, Any] = {}
     try:
         compile(code, KERNEL_PY, "exec")
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as e:
@@ -44,7 +100,9 @@ def build_python(code: str, out_dir: Path) -> BuildResult:
             error_detail = f"{type(e).__name__}: {e.msg}{loc}"
         else:
             error_detail = f"{type(e).__name__}: {e}"
-        log = error_detail
+    else:
+        if inspect is not None:
+            error_kind, error_detail, extra = inspect(ast.parse(code))
     build_time_ms = (time.perf_counter() - t0) * 1000.0
 
     res = BuildResult(
@@ -52,15 +110,21 @@ def build_python(code: str, out_dir: Path) -> BuildResult:
         artifact=artifact if not error_kind else None,
         error_kind=error_kind,
         error_detail=error_detail,
-        log=log,
+        log=error_detail,
         build_time_ms=build_time_ms,
         command=[COMPILER_NAME, "compile", KERNEL_PY],
-        compiler=COMPILER_NAME,
-        compiler_version=cc_version,
+        compiler=compiler,
+        compiler_version=compiler_version,
         n_warnings=0,
+        extra=extra,
     )
     atomic_write_json(out_dir / BUILD_JSON, res.to_dict())
     return res
+
+
+def build_python(code: str, out_dir: Path) -> BuildResult:
+    """``out_dir/kernel.py`` 를 쓰고 ``compile(code, "kernel.py", "exec")`` 로 구문만 검사한다. ``build.json`` 도 저장."""
+    return build_python_source(code, out_dir, compiler=COMPILER_NAME, compiler_version=platform.python_version())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,4 +139,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # 컴파일러 출력·경로·한국어 진단을 찍다가 로캘 코드페이지에서 죽지 않게 스트림을 정리한다(진입점에서만).
+    from harness.procutil import setup_stdio
+
+    setup_stdio()
     sys.exit(main())

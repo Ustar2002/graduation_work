@@ -1,19 +1,32 @@
-"""protocol 테스트: /proc/stat 파서·사용률 계산, launch_prefix/launch_env 규칙, 플래그 판정, 실제 동적 검사."""
+"""protocol 테스트: /proc/stat 파서·사용률 계산, launch_prefix/launch_env 규칙, 플래그 판정, 실제 동적 검사,
+플랫폼 플래그, 선택 설정 기본값, 툴체인 정체(가짜 run_isolated)와 환경 지문."""
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import shutil
+import subprocess
 import unittest
+from dataclasses import asdict, replace
+from types import SimpleNamespace
 from unittest import mock
 
+from harness import config as config_module
+from harness import protocol
 from harness.config import load_config, parse_cpulist
+from harness.paths import PYTHON_EXE
+from harness.procutil import ProcResult
 from harness.protocol import (
     DynamicStatus,
     StaticStatus,
     blas_flag_label,
     busy_pct,
     check_dynamic,
+    check_static,
+    config_option,
     dropped_env_overrides,
     environment_fingerprint,
     flags_ok,
@@ -21,8 +34,19 @@ from harness.protocol import (
     launch_env,
     launch_prefix,
     parse_proc_stat,
+    platform_flag,
     sibling_cpus,
+    toolchain_identity,
 )
+from tests._support import requires_modules
+
+# 지문·프로브 테스트가 쓰는 고정 툴체인(``toolchain_identity`` 의 결과 형태)
+TOOLCHAIN = {
+    "cc": "gcc", "cc_version": "gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0", "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)", "numba_version": "0.68.1", "halide_version": "22.1.0",
+    "halide_autoscheduler": "Mullapudi2016", "halide_autoscheduler_loadable": True,
+    "lint_tools": {"ruff": "0.17.6", "pyflakes": "4.1.0", "cppcheck": "2.13.0", "clang-tidy": None}, "errors": {},
+}
 
 PROC_STAT_BEFORE = """cpu  100 0 100 800 0 0 0 0 0 0
 cpu0 10 0 10 80 0 0 0 0 0 0
@@ -145,6 +169,477 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(env["OMP_DYNAMIC"], "false")
         self.assertNotIn("HOME", env)  # 사용자 환경에 없던 것은 생기지 않는다
 
+    def test_launch_env_extra_env_is_applied_last(self) -> None:
+        """언어의 env 설정(설계 v3 §8)은 스레드 변수·omp_env_extra 뒤에 덮어쓴다. 값은 문자열로 들어간다."""
+        extra = {"NUMBA_NUM_THREADS": "4", "NUMBA_THREADING_LAYER": "omp", "OMP_PLACES": "threads", "HL_NUM_THREADS": 4}
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
+            plain = launch_env(self.cfg, 4, openmp=True)
+            env = launch_env(self.cfg, 4, openmp=True, extra_env=extra)
+            self.assertEqual(launch_env(self.cfg, 4, openmp=True, extra_env=None), plain)
+            self.assertEqual(launch_env(self.cfg, 4, openmp=True, extra_env={}), plain)
+        self.assertEqual(env["NUMBA_NUM_THREADS"], "4")
+        self.assertEqual(env["NUMBA_THREADING_LAYER"], "omp")
+        self.assertEqual(env["HL_NUM_THREADS"], "4")
+        self.assertEqual(env["OMP_PLACES"], "threads", "extra_env 가 omp_env_extra 를 덮어쓴다")
+        self.assertEqual(plain["OMP_PLACES"], "cores")
+        # 나머지는 그대로다
+        self.assertEqual({k: v for k, v in env.items() if k not in extra}, {k: v for k, v in plain.items() if k not in extra})
+        self.assertNotIn("NUMBA_NUM_THREADS", plain)
+
+    def test_launch_env_python_io_encoding_only_off_posix(self) -> None:
+        """비-POSIX(개발용 Windows)에서만 워커의 표준 스트림을 UTF-8 로 고정한다. POSIX 의 환경은 그대로다."""
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
+            here = launch_env(self.cfg, 4, openmp=False)
+            with mock.patch.object(protocol, "IS_POSIX", True):
+                posix = launch_env(self.cfg, 4, openmp=False)
+            with mock.patch.object(protocol, "IS_POSIX", False):
+                other = launch_env(self.cfg, 4, openmp=False)
+        self.assertNotIn("PYTHONIOENCODING", posix)
+        self.assertEqual(other["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual({k: v for k, v in other.items() if k != "PYTHONIOENCODING"}, posix)
+        self.assertEqual(here, posix if os.name == "posix" else other)  # 이 머신의 실제 값
+
+
+class PlatformFlagTest(unittest.TestCase):
+    """비-Linux 는 ``platform=<sys.platform>`` 플래그(정보용 아님)로 표시된다 (설계 v3 §10.4)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cfg = load_config()
+
+    def test_flag_by_platform_name(self) -> None:
+        self.assertIsNone(platform_flag("linux"))
+        self.assertEqual(platform_flag("win32"), "platform=win32")
+        self.assertEqual(platform_flag("darwin"), "platform=darwin")
+        self.assertFalse(is_informational("platform=win32"))
+        self.assertFalse(flags_ok(["turbo=on", "platform=win32"]))
+
+    def test_this_machine(self) -> None:
+        import sys
+
+        expected = None if sys.platform.startswith("linux") else f"platform={sys.platform}"
+        self.assertEqual(platform_flag(), expected)
+
+    def test_check_static_carries_the_flag(self) -> None:
+        """이 머신에서 실제로 돈다(BLAS 정체 서브프로세스 포함): 플래그는 플랫폼이 정하고, 있으면 ok 가 아니다."""
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            st = check_static(self.cfg, {})
+        self.assertIsInstance(st, StaticStatus)
+        mark = platform_flag()
+        self.assertEqual([f for f in st.flags if f.startswith("platform=")], [mark] if mark else [])
+        self.assertEqual(st.ok, flags_ok(st.flags))
+        if mark:
+            self.assertFalse(st.ok)
+            self.assertIn(mark, err.getvalue())
+
+    def test_check_static_and_dynamic_with_a_foreign_platform(self) -> None:
+        with mock.patch.object(protocol, "platform_flag", return_value="platform=testos"), \
+                mock.patch.object(protocol, "blas_identity_subprocess", return_value={"name": "scipy-openblas", "version": "0.3.30"}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            static = check_static(self.cfg, {})
+            dynamic = check_dynamic(self.cfg, sample_s=0.0)
+        self.assertIn("platform=testos", static.flags)
+        self.assertFalse(static.ok)
+        self.assertTrue(static.blas_ok)
+        self.assertIn("platform=testos", dynamic.flags)
+        self.assertFalse(dynamic.ok)
+
+    def test_check_dynamic_on_linux_has_no_platform_flag(self) -> None:
+        with mock.patch.object(protocol, "platform_flag", return_value=None), contextlib.redirect_stderr(io.StringIO()):
+            dynamic = check_dynamic(self.cfg, sample_s=0.0)
+        self.assertFalse([f for f in dynamic.flags if f.startswith("platform=")])
+
+    def test_load_average_is_zero_where_the_os_has_none(self) -> None:
+        with mock.patch.object(os, "getloadavg", None, create=True):
+            self.assertEqual(protocol.read_load_1m(), 0.0)
+            with mock.patch.object(protocol, "read_proc_stat", return_value={}), contextlib.redirect_stderr(io.StringIO()):
+                st = check_dynamic(self.cfg, sample_s=0.0)  # /proc/stat 도 getloadavg 도 없는 플랫폼: 죽지 않고 0 을 준다
+        self.assertEqual((st.load_1m, st.pinned_busy_pct, st.sibling_busy_pct), (0.0, 0.0, 0.0))
+        with mock.patch.object(os, "getloadavg", lambda: (1.5, 1.0, 0.5), create=True):
+            self.assertEqual(protocol.read_load_1m(), 1.5)
+
+
+class SettleWaitTest(unittest.TestCase):
+    """``measurement.max_settle_s`` (기본 0 = 기다리지 않음): 양수면 동적 검사 전에 1분 부하가 ``max_load_1m`` 아래로 내려가길
+    5초 간격으로 기다린다(최대 max_settle_s). 하네스 자신의 앞선 다중 스레드 bench 가 남긴 부하로 다음 행이 플래그를 받지 않게."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.base = load_config()
+
+    def dynamic(self, loads: list[float], max_settle_s: float) -> tuple[DynamicStatus, list[float], list[float]]:
+        cfg = replace(self.base, measurement=replace(self.base.measurement, max_load_1m=2.0, max_settle_s=max_settle_s))
+        remaining, sleeps = list(loads), []
+
+        def load() -> float:
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+        with mock.patch.object(protocol, "read_load_1m", side_effect=load), \
+                mock.patch.object(protocol.time, "sleep", side_effect=sleeps.append), \
+                mock.patch.object(protocol, "read_proc_stat", return_value={}), \
+                mock.patch.object(protocol, "platform_flag", return_value=None), contextlib.redirect_stderr(io.StringIO()):
+            st = check_dynamic(cfg, sample_s=0.0)
+        return st, sleeps, remaining
+
+    def test_default_does_not_wait(self) -> None:
+        self.assertEqual(config_option(None, "measurement.max_settle_s"), 0.0)
+        st, sleeps, _ = self.dynamic([2.6, 2.6], 0.0)
+        self.assertEqual(sleeps, [0.0], "1초 샘플(여기서는 0초) 말고는 자지 않는다")
+        self.assertEqual(st.settle_wait_s, 0.0)
+        self.assertIn("load_1m=2.6>2.0", st.flags)
+
+    def test_waits_until_the_load_falls_below_the_limit(self) -> None:
+        st, sleeps, _ = self.dynamic([2.6, 2.2, 1.8], 60.0)
+        self.assertEqual(sleeps, [5.0, 5.0, 0.0])
+        self.assertEqual((st.settle_wait_s, st.load_1m, st.load_ok), (10.0, 1.8, True))
+        self.assertFalse([f for f in st.flags if f.startswith("load_1m=")])
+        self.assertEqual(asdict(st)["settle_wait_s"], 10.0, "run.py 는 asdict(dyn) 을 stages['dynamic'] 에 넣는다")
+
+    def test_the_wait_is_bounded_and_the_flag_stays_if_the_load_does_not_fall(self) -> None:
+        st, sleeps, _ = self.dynamic([3.0], 12.0)
+        self.assertEqual(sleeps, [5.0, 5.0, 2.0, 0.0])
+        self.assertEqual(st.settle_wait_s, 12.0)
+        self.assertIn("load_1m=3.0>2.0", st.flags)
+        self.assertFalse(st.ok)
+
+
+class ConfigOptionTest(unittest.TestCase):
+    """선택 설정(설계 v3 §8)은 속성이 있으면 그 값, 없으면 ``OPTION_DEFAULTS`` — 그 기본값은 설정 로더의 기본값과 같아야 한다."""
+
+    def test_present_attribute_wins(self) -> None:
+        cfg = SimpleNamespace(lint=SimpleNamespace(enabled=False), halide=SimpleNamespace(autoscheduler="Adams2019"),
+                              build=SimpleNamespace(rust=SimpleNamespace(cargo="/opt/cargo")))
+        self.assertIs(config_option(cfg, "lint.enabled"), False)
+        self.assertEqual(config_option(cfg, "halide.autoscheduler"), "Adams2019")
+        self.assertEqual(config_option(cfg, "build.rust").cargo, "/opt/cargo")
+        lang = SimpleNamespace(env={"HL_NUM_THREADS": "4"}, halide_mode="auto")
+        self.assertEqual(config_option(lang, "env"), {"HL_NUM_THREADS": "4"})
+        self.assertEqual(config_option(lang, "halide_mode"), "auto")
+
+    def test_missing_attribute_anywhere_on_the_path_gives_the_default(self) -> None:
+        for obj in (None, SimpleNamespace(), SimpleNamespace(halide=SimpleNamespace(), build=SimpleNamespace(cc="gcc"))):
+            self.assertIs(config_option(obj, "lint.enabled"), True)
+            self.assertIs(config_option(obj, "safety.enabled"), False)
+            self.assertIs(config_option(obj, "perf_summary.enabled"), True)
+            self.assertEqual(config_option(obj, "halide.autoscheduler"), "Mullapudi2016")
+            self.assertEqual(config_option(obj, "halide.autoscheduler_params"), {})
+            self.assertEqual(config_option(obj, "build.rust").cargo, "cargo")
+            self.assertEqual(config_option(obj, "env"), {})
+            self.assertIsNone(config_option(obj, "halide_mode"))
+        with self.assertRaises(KeyError):
+            config_option(SimpleNamespace(), "no.such.option")
+
+    def test_defaults_match_the_config_loader(self) -> None:
+        self.assertEqual(config_option(None, "lint.enabled"), config_module.LintCfg().enabled)
+        self.assertEqual(config_option(None, "safety.enabled"), config_module.SafetyCfg().enabled)
+        self.assertEqual(config_option(None, "perf_summary.enabled"), config_module.PerfSummaryCfg().enabled)
+        halide = config_module.HalideCfg()
+        self.assertEqual(config_option(None, "halide.autoscheduler"), halide.autoscheduler)
+        self.assertEqual(config_option(None, "halide.autoscheduler_params"), halide.autoscheduler_params)
+        self.assertEqual(vars(config_option(None, "build.rust")), vars(config_module.RustCfg()))
+        fields = config_module.LanguageCfg.__dataclass_fields__
+        self.assertEqual(config_option(None, "env"), fields["env"].default_factory())
+        self.assertEqual(config_option(None, "halide_mode"), fields["halide_mode"].default)
+        self.assertEqual(config_option(None, "measurement.max_settle_s"),
+                         config_module.MeasurementCfg.__dataclass_fields__["max_settle_s"].default)
+
+    def test_loaded_config_carries_every_option(self) -> None:
+        cfg = load_config()
+        for key in protocol.OPTION_DEFAULTS:
+            obj = next(iter(cfg.languages.values())) if key in ("env", "halide_mode") else cfg
+            value = obj
+            for name in key.split("."):
+                self.assertTrue(hasattr(value, name), f"{key}: 설정 객체에 {name} 이 없다")
+                value = getattr(value, name)
+            self.assertIs(config_option(obj, key), value)
+
+
+def _proc(stdout: str = "", *, rc: int = 0, stderr: str = "") -> ProcResult:
+    return ProcResult(rc=rc, timed_out=False, elapsed_s=0.01, stdout_tail=stdout, stderr_tail=stderr, signal_name=None)
+
+
+PYTHON_TOOLCHAIN_DOC = {"numba_version": "0.68.1", "halide_version": "22.1.0", "halide_autoscheduler_loadable": True,
+                        "lint_tools": {"ruff": "0.17.6", "pyflakes": "4.1.0"}, "errors": {}}
+VERSION_OUTPUTS = {
+    "gcc": "gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\n",
+    "/opt/rust/bin/cargo": "cargo 1.92.0 (344c4567c 2025-10-21)\n",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\n",
+    "cppcheck": "Cppcheck 2.13.0\n",
+    "clang-tidy": "Ubuntu LLVM version 18.1.3\n  Optimized build.\n",
+}
+
+
+class ToolchainIdentityTest(unittest.TestCase):
+    """``toolchain_identity`` (설계 v3 §10.4)를 가짜 ``run_isolated`` 로: 어떤 명령을 띄우고 출력을 어떻게 읽는가."""
+
+    def setUp(self) -> None:
+        self.cfg = SimpleNamespace(build=SimpleNamespace(cc="gcc", rust=SimpleNamespace(cargo="/opt/rust/bin/cargo")),
+                                   halide=SimpleNamespace(autoscheduler="Adams2019"))
+        self.calls: list[list[str]] = []
+        self.present = set(VERSION_OUTPUTS)
+        self.outputs = dict(VERSION_OUTPUTS)
+        self.python_result = _proc(json.dumps(PYTHON_TOOLCHAIN_DOC) + "\n")
+
+    def identity(self, cfg: object) -> dict:
+        def run(cmd: list[str], **kwargs: object) -> ProcResult:
+            self.calls.append(list(cmd))
+            if "--python-toolchain" in cmd:
+                return self.python_result
+            self.assertEqual(cmd[1:], ["--version"])
+            return _proc(self.outputs[cmd[0]])
+
+        def which(name: str, *args: object, **kwargs: object) -> str | None:
+            return f"/bin/{name}" if name in self.present else None
+
+        with mock.patch.object(protocol, "run_isolated", side_effect=run), \
+                mock.patch.object(protocol.shutil, "which", side_effect=which), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            identity = toolchain_identity(cfg)
+        self.stderr = err.getvalue()
+        return identity
+
+    def test_all_tools_present(self) -> None:
+        identity = self.identity(self.cfg)
+        self.assertEqual(identity, {
+            "cc": "gcc", "cc_version": "gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0",
+            "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)", "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+            "numba_version": "0.68.1", "halide_version": "22.1.0",
+            "halide_autoscheduler": "Adams2019", "halide_autoscheduler_loadable": True,
+            "lint_tools": {"ruff": "0.17.6", "pyflakes": "4.1.0", "cppcheck": "2.13.0", "clang-tidy": "18.1.3"},
+            "errors": {},
+        })
+        # numba·halide·ruff·pyflakes 는 커널을 돌리는 인터프리터(PYTHON_EXE)에서, 설정의 오토스케줄러 이름으로 확인한다
+        python_calls = [c for c in self.calls if "--python-toolchain" in c]
+        self.assertEqual(python_calls, [[str(PYTHON_EXE), "-m", "harness.protocol", "--python-toolchain", "Adams2019"]])
+        # cargo 는 설정의 명령(build.rust.cargo)을 본다
+        self.assertIn(["/opt/rust/bin/cargo", "--version"], self.calls)
+
+    def test_cargo_and_rustc_are_probed_in_the_build_environment(self) -> None:
+        """cargo·rustc 의 버전은 Rust 빌드와 같은 환경(``toolchain_env``: RUSTUP_TOOLCHAIN·RUSTUP_HOME·CARGO_HOME 포함)으로 본다 —
+        아니면 지문의 rustc 가 빌드한 rustc 와 다르거나(고정한 툴체인), rustup 이 툴체인을 못 찾아 cargo 가 없다고 멈춘다."""
+        from harness.build import rust as rust_build
+
+        envs: dict[str, dict[str, str]] = {}
+
+        def run(cmd: list[str], **kwargs: object) -> ProcResult:
+            if "--python-toolchain" in cmd:
+                return self.python_result
+            envs[cmd[0]] = dict(kwargs["env"])  # type: ignore[arg-type]
+            return _proc(self.outputs[cmd[0]])
+
+        user = {"RUSTUP_TOOLCHAIN": "1.92.0", "RUSTUP_HOME": "/opt/rustup", "CARGO_HOME": "/opt/cargo", "OMP_NUM_THREADS": "64"}
+        with mock.patch.dict(os.environ, user), mock.patch.object(protocol, "IS_POSIX", True), \
+                mock.patch.object(protocol, "run_isolated", side_effect=run), \
+                mock.patch.object(protocol.shutil, "which", return_value="/bin/x"), contextlib.redirect_stderr(io.StringIO()):
+            toolchain_identity(self.cfg)
+            with mock.patch.object(rust_build, "IS_POSIX", True):
+                self.assertEqual(rust_build.toolchain_env(), protocol.toolchain_env(), "빌드와 도구 점검이 같은 환경")
+        rust_keys = {"RUSTUP_TOOLCHAIN": "1.92.0", "RUSTUP_HOME": "/opt/rustup", "CARGO_HOME": "/opt/cargo"}
+        for tool in ("/opt/rust/bin/cargo", "rustc"):
+            self.assertEqual({k: envs[tool].get(k) for k in protocol.TOOLCHAIN_ENV_KEYS}, rust_keys, tool)
+            self.assertEqual(envs[tool]["OMP_NUM_THREADS"], "1", "사용자의 스레드 변수는 여전히 상속하지 않는다")
+        self.assertEqual(envs["gcc"], protocol.launch_env_minimal(), "C 컴파일러는 최소 환경 그대로")
+        self.assertFalse(set(protocol.TOOLCHAIN_ENV_KEYS) & set(envs["gcc"]))
+
+    def test_absent_tools_are_none_and_are_not_launched(self) -> None:
+        self.present = {"gcc"}
+        identity = self.identity(self.cfg)
+        self.assertEqual(identity["cc_version"], "gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0")
+        self.assertIsNone(identity["cargo"])
+        self.assertIsNone(identity["rustc"])
+        self.assertEqual(identity["lint_tools"], {"ruff": "0.17.6", "pyflakes": "4.1.0", "cppcheck": None, "clang-tidy": None})
+        self.assertEqual([c[0] for c in self.calls if c[1:] == ["--version"]], ["gcc"])
+
+    def test_python_side_results_are_passed_through(self) -> None:
+        doc = {"numba_version": None, "halide_version": "22.1.0", "halide_autoscheduler_loadable": False,
+               "lint_tools": {"ruff": None, "pyflakes": "4.1.0"},
+               "errors": {"numba": "ModuleNotFoundError: No module named 'numba'", "halide_autoscheduler": "no plugin file"}}
+        self.python_result = _proc("some banner line\n" + json.dumps(doc) + "\n")
+        identity = self.identity(self.cfg)
+        self.assertIsNone(identity["numba_version"])
+        self.assertIs(identity["halide_autoscheduler_loadable"], False)
+        self.assertEqual(identity["errors"], doc["errors"])
+        self.assertIsNone(identity["lint_tools"]["ruff"])
+        self.assertEqual(identity["lint_tools"]["cppcheck"], "2.13.0")
+
+    def test_failed_python_probe_means_nothing_python_side_is_usable(self) -> None:
+        for result in (_proc("", rc=1, stderr="Traceback ...\nImportError: boom"), _proc("not json\n"), _proc("{broken\n")):
+            self.python_result = result
+            identity = self.identity(self.cfg)
+            self.assertIsNone(identity["numba_version"])
+            self.assertIsNone(identity["halide_version"])
+            self.assertIsNone(identity["halide_autoscheduler_loadable"])
+            self.assertEqual(identity["lint_tools"], {"ruff": None, "pyflakes": None, "cppcheck": "2.13.0", "clang-tidy": "18.1.3"})
+            self.assertIn("python", identity["errors"])
+            self.assertIn("python-toolchain", self.stderr)
+
+    def test_launch_failure_of_the_interpreter_is_reported_not_raised(self) -> None:
+        def run(cmd: list[str], **kwargs: object) -> ProcResult:
+            raise FileNotFoundError("no such interpreter")
+
+        with mock.patch.object(protocol, "run_isolated", side_effect=run), contextlib.redirect_stderr(io.StringIO()):
+            doc = protocol.python_toolchain_subprocess("Mullapudi2016")
+        self.assertIsNone(doc["numba_version"])
+        self.assertIn("no such interpreter", doc["errors"]["python"])
+
+    def test_version_output_in_an_unknown_format_keeps_the_first_line(self) -> None:
+        self.outputs["cppcheck"] = "cppcheck development build\nmore\n"
+        self.outputs["clang-tidy"] = "LLVM (http://llvm.org/):\n  LLVM version 17.0.6\n"
+        identity = self.identity(self.cfg)
+        self.assertEqual(identity["lint_tools"]["cppcheck"], "cppcheck development build")
+        self.assertEqual(identity["lint_tools"]["clang-tidy"], "17.0.6")
+
+    def test_failing_version_command_counts_as_absent(self) -> None:
+        def run(cmd: list[str], **kwargs: object) -> ProcResult:
+            if "--python-toolchain" in cmd:
+                return self.python_result
+            if cmd[0] == "rustc":
+                raise OSError("exec format error")
+            return _proc("", rc=127) if cmd[0] == "gcc" else _proc(VERSION_OUTPUTS[cmd[0]])
+
+        with mock.patch.object(protocol, "run_isolated", side_effect=run), \
+                mock.patch.object(protocol.shutil, "which", return_value="/bin/x"), contextlib.redirect_stderr(io.StringIO()):
+            identity = toolchain_identity(self.cfg)
+        self.assertIsNone(identity["cc_version"])
+        self.assertIsNone(identity["rustc"])
+        self.assertEqual(identity["cargo"], "cargo 1.92.0 (344c4567c 2025-10-21)")
+
+    def test_without_a_config_the_defaults_are_probed(self) -> None:
+        self.present = {"gcc", "cargo"}
+        self.outputs["cargo"] = "cargo 1.80.0\n"
+        identity = self.identity(None)
+        self.assertEqual((identity["cc"], identity["cargo"], identity["halide_autoscheduler"]), ("gcc", "cargo 1.80.0", "Mullapudi2016"))
+        self.assertIn([str(PYTHON_EXE), "-m", "harness.protocol", "--python-toolchain", "Mullapudi2016"], self.calls)
+
+    def test_old_style_config_without_the_optional_sections(self) -> None:
+        identity = self.identity(SimpleNamespace(build=SimpleNamespace(cc="gcc")))
+        self.assertEqual(identity["halide_autoscheduler"], "Mullapudi2016")
+        self.assertIsNone(identity["cargo"], "기본 명령 cargo 는 이 테스트의 PATH 에 없다")
+
+
+@requires_modules("numba", "halide")
+class PythonToolchainLiveTest(unittest.TestCase):
+    """실제 ``PYTHON_EXE`` 서브프로세스: numba·halide 임포트와 오토스케줄러 플러그인 로드(워커와 같은 로더)."""
+
+    def test_default_autoscheduler_is_loadable(self) -> None:
+        doc = protocol.python_toolchain_subprocess("Mullapudi2016")
+        self.assertEqual(doc["errors"], {})
+        self.assertRegex(doc["numba_version"], r"^\d+\.\d+")
+        self.assertRegex(doc["halide_version"], r"^\d+\.\d+")
+        self.assertIs(doc["halide_autoscheduler_loadable"], True)
+        self.assertEqual(set(doc["lint_tools"]), {"ruff", "pyflakes"})
+
+    def test_unknown_autoscheduler_is_not_loadable_and_says_why(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            reason = protocol.halide_autoscheduler_error("NoSuchScheduler2099")
+        self.assertIn("NoSuchScheduler2099", reason)
+        self.assertEqual(err.getvalue(), "", "로더가 stderr 에 적는 사유는 가로채 돌려준다")
+        self.assertIsNone(protocol.halide_autoscheduler_error("Mullapudi2016"))
+
+
+class RuntimeProbeTest(unittest.TestCase):
+    """``runtime_probe_subprocess`` (run.py 의 도구 점검): 명령의 꼴과 결과 읽기(가짜 run_isolated), 그리고 실제 서브프로세스."""
+
+    def probe(self, result: ProcResult, kind: str = "halide") -> tuple[str | None, list[str], dict]:
+        calls: list[tuple[list[str], dict]] = []
+
+        def run(cmd: list[str], **kwargs: object) -> ProcResult:
+            calls.append((list(cmd), kwargs))
+            return result
+
+        with mock.patch.object(protocol, "run_isolated", side_effect=run):
+            error = protocol.runtime_probe_subprocess(kind, env={"HL_NUM_THREADS": "4"}, prefix=["taskset", "-c", "0-3"],
+                                                      autoscheduler="Mullapudi2016", params={"last_level_cache_size": 1048576},
+                                                      threads=4)
+        ((cmd, kwargs),) = calls
+        return error, cmd, kwargs
+
+    def test_command_and_environment(self) -> None:
+        error, cmd, kwargs = self.probe(_proc('{"error": null}\n'))
+        self.assertIsNone(error)
+        self.assertEqual(cmd, ["taskset", "-c", "0-3", str(PYTHON_EXE), "-m", "harness.protocol", "--probe-runtime", "halide",
+                               "--halide-autoscheduler", "Mullapudi2016", "--halide-params", '{"last_level_cache_size": 1048576}',
+                               "--threads", "4"])
+        self.assertEqual(kwargs["env"], {"HL_NUM_THREADS": "4"})
+        _, cmd, _ = self.probe(_proc('{"error": null}\n'), kind="numba")
+        self.assertEqual(cmd[-2:], ["--probe-runtime", "numba"])
+
+    def test_reported_error_and_a_process_that_ends_without_a_result(self) -> None:
+        self.assertEqual(self.probe(_proc('warning line\n{"error": "ValueError: bad"}\n'))[0], "ValueError: bad")
+        aborted = ProcResult(rc=-6, timed_out=False, elapsed_s=0.1, stdout_tail="", stderr_tail="Unknown key: beam_sizee\n",
+                             signal_name="SIGABRT")
+        error = self.probe(aborted)[0]
+        self.assertIn("SIGABRT", error)
+        self.assertIn("Unknown key: beam_sizee", error)
+        self.assertIn("rc=1", self.probe(_proc("", rc=1, stderr="Traceback"))[0])
+
+
+@requires_modules("halide")
+class HalideRuntimeProbeLiveTest(unittest.TestCase):
+    """실제 서브프로세스: 워커와 같은 준비(make_loader)로 오토스케줄러를 설정의 매개변수로 건다. 모르는 키는 Halide 22.1 에서
+    프로세스 중단이다 — 그것도 사유가 된다(도구 점검의 exit 7)."""
+
+    def test_good_and_bad_parameters(self) -> None:
+        env = protocol.launch_env_minimal()
+        self.assertIsNone(protocol.runtime_probe_subprocess("halide", env=env, autoscheduler="Mullapudi2016", params={}, threads=2))
+        error = protocol.runtime_probe_subprocess("halide", env=env, autoscheduler="Mullapudi2016",
+                                                  params={"no_such_parameter_2099": "1"}, threads=2)
+        self.assertIsNotNone(error)
+
+
+@requires_modules("numba")
+class NumbaRuntimeProbeLiveTest(unittest.TestCase):
+    def test_threading_layer(self) -> None:
+        env = protocol.launch_env_minimal()
+        self.assertIsNone(protocol.runtime_probe_subprocess("numba", env={**env, "NUMBA_THREADING_LAYER": "workqueue"}))
+        error = protocol.runtime_probe_subprocess("numba", env={**env, "NUMBA_THREADING_LAYER": "no_such_layer"})
+        self.assertIsNotNone(error)
+
+
+class EntryPointStreamsTest(unittest.TestCase):
+    """회귀: ``python -m harness.protocol --help`` 가 파이프에서 로캘 코드페이지로 찍혀(Windows) 한글이 깨졌다(설계 v3 §16)."""
+
+    def test_help_is_utf8_on_a_pipe(self) -> None:
+        r = subprocess.run([str(PYTHON_EXE), "-m", "harness.protocol", "--help"], capture_output=True, timeout=120,
+                           cwd=str(protocol.ROOT), env={**os.environ, "PYTHONIOENCODING": ""})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("측정 규약", r.stdout.decode("utf-8"))
+
+
+class ProbeMachineTest(unittest.TestCase):
+    """``probe_machine`` 은 툴체인 정체를 machine.yaml 키로 옮긴다(서브프로세스를 띄우는 헬퍼는 대역으로 바꾼다)."""
+
+    def probe(self, cfg: object, toolchain: dict) -> tuple[dict, mock.Mock]:
+        identity = {"python_version": "3.14.4", "numpy_version": "2.3.5", "numpy_blas": {"name": "scipy-openblas"},
+                    "sdk_versions": {"anthropic": None, "openai": None}}
+        with mock.patch.object(protocol, "toolchain_identity", return_value=toolchain) as probe, \
+                mock.patch.object(protocol, "env_identity_subprocess", return_value=identity), \
+                mock.patch.object(protocol, "compiler_version", return_value=None), \
+                mock.patch.object(protocol, "resolve_march", return_value="-march=x"), \
+                mock.patch.object(protocol, "_openmp_works", return_value=True), \
+                mock.patch.object(protocol, "_sudo_nopasswd", return_value=False):
+            return protocol.probe_machine(cfg), probe
+
+    def test_toolchain_keys(self) -> None:
+        cfg = load_config()
+        machine, probe = self.probe(cfg, TOOLCHAIN)
+        probe.assert_called_once_with(cfg)
+        self.assertEqual(machine["compilers"]["gcc"], TOOLCHAIN["cc_version"])
+        self.assertTrue(machine["compilers"]["openmp_gcc"])
+        self.assertIsNone(machine["compilers"]["clang"])
+        for key in ("cargo", "rustc", "numba_version", "halide_version", "halide_autoscheduler", "halide_autoscheduler_loadable",
+                    "lint_tools"):
+            self.assertEqual(machine[key], TOOLCHAIN[key], key)
+        self.assertEqual(machine["march_resolved"], "-march=x")
+        self.assertNotIn("errors", machine)
+
+    def test_other_compiler_and_no_config(self) -> None:
+        machine, probe = self.probe(None, {**TOOLCHAIN, "cc": "tcc", "cc_version": "tcc 0.9.27"})
+        probe.assert_called_once_with(None)
+        self.assertEqual(machine["compilers"]["tcc"], "tcc 0.9.27")
+        self.assertIsNone(machine["compilers"]["gcc"])
+        self.assertFalse(machine["compilers"]["openmp_gcc"])
+
 
 class LiveChecksTest(unittest.TestCase):
     """실제 sysfs/proc 를 읽는 검사(이 머신에서 1초)."""
@@ -182,8 +677,8 @@ class LiveChecksTest(unittest.TestCase):
             "cpu_model": "cpu", "kernel": "k", "glibc": "2.43", "compilers": {"gcc": "gcc 15"}, "march_resolved": "-march=x",
             "python_version": "3.14.4", "numpy_version": "2.3.5", "sdk_versions": {"anthropic": "2.4.0", "openai": "3.44.0"},
         }
-        fp1, h1 = environment_fingerprint(self.cfg, machine, static)
-        fp2, h2 = environment_fingerprint(self.cfg, machine, static)
+        fp1, h1 = environment_fingerprint(self.cfg, machine, static, toolchain=TOOLCHAIN)
+        fp2, h2 = environment_fingerprint(self.cfg, machine, static, toolchain=TOOLCHAIN)
         self.assertEqual(h1, h2)
         self.assertRegex(h1, r"^[0-9a-f]{16}$")
         self.assertEqual(fp1["cores"], "0,2,4,6")
@@ -193,8 +688,36 @@ class LiveChecksTest(unittest.TestCase):
         self.assertEqual(fp1["governor"], "powersave")
         # 거버너가 바뀌면 지문도 바뀐다
         static2 = StaticStatus(**{**static.__dict__, "governor": "performance"})
-        _, h3 = environment_fingerprint(self.cfg, machine, static2)
+        _, h3 = environment_fingerprint(self.cfg, machine, static2, toolchain=TOOLCHAIN)
         self.assertNotEqual(h1, h3)
+        # 툴체인(설계 v3 §10.4): rustc·numba·halide·린트 도구의 버전이 지문에 들어가고, 바뀌면 지문도 바뀐다
+        self.assertEqual(fp1["rustc"], TOOLCHAIN["rustc"])
+        self.assertEqual((fp1["numba_version"], fp1["halide_version"]), ("0.68.1", "22.1.0"))
+        self.assertEqual(fp1["lint_tools"], TOOLCHAIN["lint_tools"])
+        for key, value in (("rustc", "rustc 1.93.0"), ("numba_version", "0.69.0"), ("halide_version", None),
+                           ("lint_tools", {**TOOLCHAIN["lint_tools"], "ruff": "0.18.0"})):
+            _, changed = environment_fingerprint(self.cfg, machine, static, toolchain={**TOOLCHAIN, key: value})
+            self.assertNotEqual(changed, h1, key)
+        # 오토스케줄러를 로드할 수 있는지와 사유는 도구 점검의 것이지 지문이 아니다
+        _, same = environment_fingerprint(self.cfg, machine, static,
+                                          toolchain={**TOOLCHAIN, "halide_autoscheduler_loadable": False, "errors": {"x": "y"}})
+        self.assertEqual(same, h1)
+
+    def test_environment_fingerprint_probes_the_toolchain_when_not_given(self) -> None:
+        static = StaticStatus(
+            governor="performance", governor_ok=True, epp="performance", epp_ok=True, no_turbo=1, taskset_available=True,
+            cores="0,2,4,6", single_core="2", threads=4, blas={"name": "scipy-openblas", "version": "0.3.30", "config": ""},
+            blas_ok=True, flags=[], ok=True, checked_at="2026-11-21T10:00:00+09:00",
+        )
+        machine = {"cpu_model": "cpu", "kernel": "k", "glibc": "2.43", "compilers": {"gcc": "gcc 15"}, "march_resolved": "-march=x",
+                   "python_version": "3.14.4", "numpy_version": "2.3.5", "sdk_versions": {"anthropic": None, "openai": None},
+                   "numba_version": "0.1-stale", "rustc": "stale"}  # machine.yaml 의 옛 값은 쓰지 않는다
+        with mock.patch.object(protocol, "toolchain_identity", return_value=TOOLCHAIN) as probe:
+            fp, digest = environment_fingerprint(self.cfg, machine, static)
+        probe.assert_called_once_with(self.cfg)
+        self.assertEqual(fp["numba_version"], "0.68.1")
+        self.assertEqual(fp["rustc"], TOOLCHAIN["rustc"])
+        self.assertEqual(digest, environment_fingerprint(self.cfg, machine, static, toolchain=TOOLCHAIN)[1])
 
 
 if __name__ == "__main__":

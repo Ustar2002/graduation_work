@@ -1,0 +1,59 @@
+/home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:8:27: runtime error: signed integer overflow: 65536 * 65536 cannot be represented in type 'int'
+    #0 0x7f0e5a20e1f3 in histogram /home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:8
+    #1 0x7f0e5b61bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f0e5b61840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:8:27
+/home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:13:20: runtime error: index -1 out of bounds for type 'int [256]'
+    #0 0x7f0e5a20e3a9 in histogram /home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:13
+    #1 0x7f0e5b61bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f0e5b61840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:13:20
+=================================================================
+==12352==ERROR: AddressSanitizer: stack-buffer-underflow on address 0x7ffc4a9e2d1c at pc 0x7f0e5a20e3d5 bp 0x7ffc4a9e2cf0 sp 0x7ffc4a9e2ce8
+WRITE of size 4 at 0x7ffc4a9e2d1c thread T0
+    #0 0x7f0e5a20e3d4 in histogram /home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:13
+    #1 0x7f0e5b61bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f0e5b61840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+Address 0x7ffc4a9e2d1c is located in stack of thread T0 at offset 44 in frame
+    #0 0x7f0e5a20e0e8 in histogram /home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:4
+
+  This frame has 1 object(s):
+    [48, 1072) 'local' (line 5) <== Memory access at offset 44 underflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-underflow /home/ustar/dev/graduate_project/results/built/san-check/histogram/c_seq/args-positional_hint-off_fb-compiler/sample_1/san/kernel.c:13 in histogram
+Shadow bytes around the buggy address:
+  0x7ffc4a9e2a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2b00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2b80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2c00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2c80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1
+=>0x7ffc4a9e2d00: f1 f1 f1[f1]00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2d80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2e00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2e80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2f00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7ffc4a9e2f80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==12352==ABORTING

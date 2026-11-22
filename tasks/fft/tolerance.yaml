@@ -1,0 +1,16 @@
+# fft 허용오차. 비교식: |out − ref| ≤ atol + rtol·|ref| — out 의 float32 원소(실수부·허수부)마다 따로 본다. ref 는 float64 변환.
+# 실측(2026-11-22, zig cc(clang) -O3 -march=native, 형태 n = 8 / 1024 / 2^16 / 2^22; 여유 = max |err| / (atol + rtol·|ref|)):
+#   (a) float32 반복 radix-2, 회전 인자를 배정밀도로 구함(표 또는 배정밀도 점화식)   4.7e-5 / 2.1e-4 / 3.0e-4 / 4.7e-4  (최대 절대오차 6.5e-7)
+#   (b) 같은 구조, 회전 인자를 단계마다 float32 반복 곱셈(w = w·w_step)으로 구함     7.8e-5 / 5.3e-3 / 0.31 / 0.88      (최대 절대오차 1.4e-3)
+#   (b') 회전 인자 표(n/2 개) 전체를 float32 반복 곱셈으로 채움                      7.8e-5 / 1.4e-2 / 0.69 / 8.65      → large 에서 실패(imprecise)
+#   (c) 버터플라이마다 float32 cosf/sinf 로 직접 구함(누적 없음)                     4.7e-5 / 5.7e-4 / 1.4e-3 / 1.9e-3
+#   NumPy 기준선(내부 배정밀도) 2.2e-5 / 2.9e-5 / 3.7e-5 / 4.0e-5, NumPy 의 단정밀도 루프 4.7e-5 / 1.9e-4 / 3.6e-4 / 4.9e-4
+# 즉 정확한 회전 인자를 쓴 float32 구현은 2100배 여유가 있고, (b) 는 통과하지만 large 에서 여유가 1.14배뿐이다
+# (-ffp-contract=off/on/fast 에서 0.88–0.91). 구조가 틀린 커널(부호·정규화·순열·배치)은 370–2500배로 실패한다. docs/decisions.md 참조.
+task: fft
+dtype: float32
+rtol: 1.0e-3                   # 설계 v3 §4. 입력 진폭이 1/sqrt(n) 이라 출력 성분의 표준편차가 형태와 무관하게 약 0.58 이다
+atol: 1.0e-3                   # 출력 성분은 0 근처 값이 흔하므로(평균 0) 절대 허용오차가 판정을 정한다
+reference_dtype: float64
+numeric_pattern_tol_ratio: 20
+sentinel: -2048.0              # 출력 사전 채움값. 평가 입력의 출력 성분은 절댓값 16 미만이라(gen_tests.py 가 확인) 정당한 값이 될 수 없다

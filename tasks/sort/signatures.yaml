@@ -1,0 +1,15 @@
+# sort 과제 시그니처 (기계 판독 부분은 harness/taskspec.py). 언어별 시그니처·매개변수 설명은 harness/sigs.py 가
+# args 에서 만든다(languages 절 없음). doc 는 프롬프트의 매개변수 설명에 그대로 붙는 영어 구절이다.
+task: sort
+function: sort
+params: [keys, out, n]
+args:
+  - {name: keys, kind: in,  dtype: int32, shape: [n], doc: "the values to sort, in arbitrary order; any int32 value may occur, values may be negative and may repeat"}
+  - {name: out,  kind: out, dtype: int32, shape: [n], doc: "receives the n values of `keys` in ascending order"}
+  - {name: n, kind: dim, doc: "the number of keys, always consistent with the array shapes above"}
+# work 는 두지 않는다: 부동소수 연산이 없는 정수 커널이라 gflops 는 NA 로 남긴다(비교·이동 횟수는 알고리즘마다 달라 과제의 상수가 아니다).
+# 기준선은 NumPy 정렬이다. BLAS 를 쓰지 않으므로 BLAS 정체 게이트(gate_blas)를 끈다.
+baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: false, gate_min_gflops: false}
+unsupported:
+  halide_auto: "data-dependent control flow is not expressible as a Halide pipeline"
+  halide_manual: "data-dependent control flow is not expressible as a Halide pipeline"

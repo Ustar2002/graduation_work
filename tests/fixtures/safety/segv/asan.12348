@@ -1,0 +1,18 @@
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==12348==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x7f6b3c20e16a bp 0x7ffe1c7d2f40 sp 0x7ffe1c7d2f20 T0)
+==12348==The signal is caused by a WRITE memory access.
+==12348==Hint: address points to the zero page.
+    #0 0x7f6b3c20e16a in gemm kernel.c:6
+    #1 0x7f6b3d61bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #2 0x7f6b3d61840e in ffi_call_int (/lib/x86_64-linux-gnu/libffi.so.8+0x440e) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #3 0x7f6b3d61b0ad in ffi_call (/lib/x86_64-linux-gnu/libffi.so.8+0x70ad) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+    #4 0x7f6b3d64d2c8 in _ctypes_callproc (/usr/lib/python3.14/lib-dynload/_ctypes.cpython-314-x86_64-linux-gnu.so+0x152c8) (BuildId: 9c1f0e6b7a8d4c35b2a1908f7e6d5c4b3a291807)
+    #5 0x5a3d6c1e4a2c in _PyObject_MakeTpCall (/usr/bin/python3.14+0x1e4a2c) (BuildId: 4b7e1d9a0c3f5e6872a1b0c9d8e7f6a5b4c3d2e1)
+    #6 0x7f6b3e02a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #7 0x7f6b3e02a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #8 0x5a3d6c3e8964 in _start (/usr/bin/python3.14+0x3e8964) (BuildId: 4b7e1d9a0c3f5e6872a1b0c9d8e7f6a5b4c3d2e1)
+
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: SEGV kernel.c:6 in gemm
+==12348==ABORTING

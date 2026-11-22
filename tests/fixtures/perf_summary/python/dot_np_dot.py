@@ -1,0 +1,4 @@
+import numpy as np
+
+def dot(x, y, out, n):
+    out[0] = np.dot(x, y)

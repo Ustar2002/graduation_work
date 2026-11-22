@@ -1,6 +1,6 @@
 run:
-  tasks: [gemm, jacobi2d, spmv_csr, dot]
-  languages: [numpy, c_seq, c_openmp]
+  tasks: [gemm, jacobi2d, spmv_csr, dot, histogram, prefix_sum, nbody, sort, cholesky, floyd_warshall, bfs, fft]   # Tier 1 + Tier 2 + Tier 3 (CLAUDE.md §4)
+  languages: [numpy, c_seq, c_openmp]   # 기본값은 M2a 그대로. M3 언어(numba, halide_auto, halide_manual, rust)는 --languages 로 고른다
   n_samples: 5                 # M1=3, M2부터 5 (CLAUDE.md §1)
   max_repair_turns: 0          # M1=0 (설계 상한 3; M4)
   conditions:
@@ -30,6 +30,11 @@ languages:
   numpy:    {backend: python, prompt: prompts/lang/numpy.md,    threads: measurement}
   c_seq:    {backend: c,      prompt: prompts/lang/c_seq.md,    openmp: false, threads: 1}
   c_openmp: {backend: c,      prompt: prompts/lang/c_openmp.md, openmp: true,  threads: measurement}
+  # M3 언어(설계 v3 §8). env 는 워커 환경에 더해진다(값의 ${threads} 는 그 언어의 스레드 수). halide_mode 는 halide 백엔드에 필수.
+  numba:         {backend: numba,  prompt: prompts/lang/numba.md,         threads: measurement, env: {NUMBA_NUM_THREADS: "${threads}", NUMBA_THREADING_LAYER: omp}}
+  halide_auto:   {backend: halide, prompt: prompts/lang/halide_auto.md,   threads: measurement, halide_mode: auto,   env: {HL_NUM_THREADS: "${threads}"}}
+  halide_manual: {backend: halide, prompt: prompts/lang/halide_manual.md, threads: measurement, halide_mode: manual, env: {HL_NUM_THREADS: "${threads}"}}
+  rust:          {backend: rust,   prompt: prompts/lang/rust.md,          threads: measurement, env: {RAYON_NUM_THREADS: "${threads}"}}
 
 build:
   cc: gcc
@@ -41,6 +46,13 @@ build:
   compile_timeout_s: 60
   forbidden_symbols: ["pthread_create", "clone", "fork", "vfork", "system", "popen", "execve", "execv", "execl"]
   thread_symbols_prefix: ["pthread_create", "GOMP_", "omp_", "__kmpc_"]   # c_seq에서 검출 시 contract_violation
+  rust: {cargo: cargo, rustflags: ["-C", "target-cpu=native"], build_timeout_s: 600, offline: true}   # RUSTFLAGS 와 `cargo build --release [--offline] --locked`. 프롬프트에 공개.
+  sanitize_flags: ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]                   # safety.enabled 일 때 cflags 뒤에 붙는 ASan/UBSan 빌드 플래그
+
+halide: {autoscheduler: Mullapudi2016, autoscheduler_params: {}}   # halide_auto 에만 적용. parallelism 은 하네스가 스레드 수로 넣는다(여기서 줄 수 없다)
+safety: {enabled: false, timeout_s: 300}          # ASan/UBSan (C 백엔드만). 실험 때 켠다
+lint:   {enabled: true, plugin: plugins/lint/run_lint.py, timeout_s: 60}
+perf_summary: {enabled: true}
 
 measurement:
   cores: "0,2,4,6"             # taskset -c (P-core 4개, SMT 형제 제외)
@@ -55,6 +67,8 @@ measurement:
   bench_timeout_s: 300
   max_worker_mem_gb: 8         # RLIMIT_AS
   max_load_1m: 2.0
+  # max_settle_s: 0            # 선택: 동적 규약 검사 전 1분 부하가 max_load_1m 아래로 내려가길 기다리는 상한(초). 0 = 기다리지 않음(기본).
+  #                            # 측정 절차를 바꾸므로 사용자 확인 전까지 꺼 둔다(docs/decisions.md).
   max_pinned_busy_pct: 10.0    # 고정 코어·형제 코어의 사전 사용률(1초 샘플)
   require_performance_governor: true   # 아니면 경고 + governor_ok=0 (실험은 계속; --strict-protocol이면 중단)
   baseline_min_gflops: 30      # 기준선이 이보다 느리면 BLAS 정체 의심 → 중단

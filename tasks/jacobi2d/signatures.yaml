@@ -7,7 +7,7 @@ args:
   - {name: dst, kind: out, dtype: float32, shape: [H, W]}
   - {name: H, kind: dim}
   - {name: W, kind: dim}
-  - {name: T, kind: dim}
+  - {name: T, kind: dim, doc: "the number of steps"}
 work: "4*(H-2)*(W-2)*T"
 baseline: {backend: c, file: baseline/baseline.c, openmp: true}
 languages:

@@ -1,0 +1,5 @@
+import numpy as np
+
+def spmv_csr(row_ptr, col_idx, vals, x, y, n_rows, n_cols, nnz):
+    rows = np.repeat(np.arange(n_rows), np.diff(row_ptr))
+    y[...] = np.bincount(rows, weights=vals.astype(np.float64) * x[col_idx], minlength=n_rows)

@@ -21,7 +21,7 @@ Define exactly:
 ${signature}
 ```
 
-${param_docs}
+${param_docs}${args_note}
 
 ## Execution environment
 
@@ -33,6 +33,6 @@ ${param_docs}
 
 Reply with exactly one fenced code block tagged `c` containing the complete `kernel.c`. No other code block.
 
----
+${grammar_hint}---
 
 ${task_spec}

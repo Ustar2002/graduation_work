@@ -20,6 +20,20 @@
 | c_openmp | 1 | NULL 포인터 **저장** `float * volatile scratch = NULL; ... *scratch = 1.0f;` | check / runtime_crash / `signal SIGSEGV during tiny call 0` | 0 |
 | c_openmp | 2 | k 루프를 병렬화하고 공유 누산기 `sum` 에 리덕션 없이 누적 | check / race_condition / `nondeterministic:<불일치 테스트 목록>` — rect·small 은 항상 포함, tiny(K=3)는 타이밍에 따라 포함되기도 함(`nondeterministic:rect,small` 과 `nondeterministic:tiny,rect,small` 둘 다 실측됨; 아래 주의) | 0 |
 
+### 수정 턴 응답 (`harness.repair`, docs/harness_design_v3.md §9.2·§14)
+
+수정 턴 t ≥ 1 의 응답은 같은 k 의 `<language>/<k>.turn<t>.md` 다. 그 파일이 없으면 `<k>.md` 를 다시 준다(같은 실패가 반복된다).
+`<k>.turn<t>.md` 는 k 를 고르는 "파일 수"에 들지 않는다(숫자 이름의 `<k>.md` 만 센다).
+
+| language | 파일 | 내용 | 턴 1 행의 기대 (error_stage / error_type / error_detail) | pass | turns_to_pass |
+|---|---|---|---|---|---|
+| c_seq | `1.turn1.md` | `1.md` 에 세미콜론만 더한 i-j-k 3중 루프(정확; 1024³ 한 번에 수 초 — 느리지만 bench 예산 안) | 없음 — 턴 0 은 build / compile_error, 턴 1 에서 통과 | 1 | 1 |
+| numpy | `2.turn1.md` | `2.md` 의 배율 1.01 을 뺀 `np.matmul(A, B, out=C)` | 없음 — 턴 0 은 check / numeric_instability, 턴 1 에서 통과 | 1 | 1 |
+
+턴 파일이 없는 실패 변형(numpy/1·4, c_seq/2, c_openmp/1·2)은 턴마다 턴 0 과 같은 응답이 와서 같은 판정이 반복된다
+(`--max-turns N` 이면 턴 N 까지 실패 행이 생기고 `turns_to_pass` 는 NA). 통과한 변형(각 언어의 0, numpy/3)은 수정 대상이 아니다
+— numpy/3 의 bench timeout 은 `pass=1` 이다.
+
 ## 변형별 주의
 
 - **c_openmp/1 의 `volatile`.** `float *p = NULL; *p = 1.0f;` 처럼 상수 NULL 저장은 gcc `-O3` 의

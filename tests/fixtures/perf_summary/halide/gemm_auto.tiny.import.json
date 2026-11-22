@@ -1,0 +1,17 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "M": 7,
+    "N": 5,
+    "K": 3
+  },
+  "inspect": {
+    "loop_nest": "produce C:\n  parallel i:\n    for j:\n      C(...) = ...\n  parallel i:\n    for k in [0, 2]:\n      for j:\n        C(...) = ...\n",
+    "schedule_source": "\nFunc C_1 = pipeline.get_func(2);\n\n{\n    Var i = C_1.args()[1];\n    RVar k$x(C_1.update(0).get_schedule().rvars()[0].var);\n    C_1\n        .compute_root()\n        .parallel(i);\n    C_1.update(0)\n        .reorder(j, k$x, i)\n        .parallel(i);\n}\n\n",
+    "autoscheduler": "Mullapudi2016",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 12.502,
+    "jit_ms": 149.74
+  }
+}

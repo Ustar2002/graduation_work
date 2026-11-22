@@ -1,0 +1,15 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "n": 33554432
+  },
+  "inspect": {
+    "loop_nest": "produce x_im:\n  parallel _0._0_vo in [0, 4194303]:\n    vectorized _0._0_vi in [0, 7]:\n      x_im(...) = ...\nconsume x_im:\n  produce y_im:\n    parallel _0._0_vo in [0, 4194303]:\n      vectorized _0._0_vi in [0, 7]:\n        y_im(...) = ...\n  consume y_im:\n    produce out:\n      parallel i:\n        out(...) = ...\n      parallel i:\n        for r in [0, 33554431]:\n          out(...) = ...\n",
+    "schedule_source": "Var _0_vi(\"_0_vi\");\nVar _0_vo(\"_0_vo\");\n\nFunc out = pipeline.get_func(2);\nFunc x_im = pipeline.get_func(0);\nFunc y_im = pipeline.get_func(1);\n\n{\n    Var i = out.args()[0];\n    RVar r$x(out.update(0).get_schedule().rvars()[0].var);\n    out\n        .compute_root()\n        .parallel(i);\n    out.update(0)\n        .reorder(i, r$x)\n        .reorder(r$x, i)\n        .parallel(i);\n}\n{\n    Var _0 = x_im.args()[0];\n    x_im\n        .compute_root()\n        .split(_0, _0_vo, _0_vi, 8)\n        .vectorize(_0_vi)\n        .parallel(_0_vo);\n}\n{\n    Var _0 = y_im.args()[0];\n    y_im\n        .compute_root()\n        .split(_0, _0_vo, _0_vi, 8)\n        .vectorize(_0_vi)\n        .parallel(_0_vo);\n}\n\n",
+    "autoscheduler": "Mullapudi2016",
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": 3.587,
+    "jit_ms": 120.469
+  }
+}

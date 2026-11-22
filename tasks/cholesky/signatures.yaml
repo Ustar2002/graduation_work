@@ -1,0 +1,11 @@
+# cholesky 과제 시그니처 (기계 판독 부분은 harness/taskspec.py). 언어별 시그니처·매개변수 설명은 harness/sigs.py 가 args 에서 만든다
+# (languages 절 없음). doc 는 프롬프트의 매개변수 설명에 그대로 들어가는 영어 구절이다 — 바꾸면 prompt_hash 가 바뀐다.
+task: cholesky
+function: cholesky
+params: [A, L, n]
+args:
+  - {name: A, kind: in,  dtype: float32, shape: [n, n], doc: "symmetric positive definite, stored in full: both triangles are valid and may be read"}
+  - {name: L, kind: out, dtype: float32, shape: [n, n], doc: "the lower-triangular factor, stored in full: every element above the diagonal must be set to 0"}
+  - {name: n, kind: dim}
+work: "n**3//3"                        # 표준 분해의 부동소수 연산 수(곱셈 n³/6 + 덧셈 n³/6); gflops 계산용
+baseline: {backend: python, file: baseline/baseline.py, openmp: false, gate_blas: true, gate_min_gflops: false}

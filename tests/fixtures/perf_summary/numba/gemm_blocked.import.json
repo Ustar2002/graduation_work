@@ -1,0 +1,12 @@
+{
+  "mode": "import",
+  "backend": "numba",
+  "inspect": {
+    "signatures": [
+      "(Array(float32, 2, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), int64, int64, int64)"
+    ],
+    "parallel_diagnostics": "",
+    "threading_layer": null,
+    "num_threads": 16
+  }
+}

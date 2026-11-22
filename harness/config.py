@@ -1,8 +1,14 @@
-"""실험 설정 로더·검증 (설계 §2).
+"""실험 설정 로더·검증 (설계 §2, v3 §8).
 
 ``config/experiment.yaml`` 을 중첩 frozen dataclass(``Config``)로 읽는다.
-순서: 1) YAML → 2) 환경변수 덮어쓰기(``LLM_PROVIDER``→model.provider, ``LLM_MODEL``→model.name)
-→ 3) 검증(실패 시 ``ConfigError`` 에 키 경로) → 4) 상대 경로를 ROOT 기준으로 절대화.
+순서: 1) YAML → 2) 덮어쓰기: 환경변수(``LLM_PROVIDER``→model.provider, ``LLM_MODEL``→model.name)와 호출자가 준 조건
+(``overrides``: ``run.conditions`` 의 args·grammar_hint·feedback) → 3) 검증(실패 시 ``ConfigError`` 에 키 경로)
+→ 4) 상대 경로를 ROOT 기준으로 절대화.
+
+v3(2026-11-20)에서 더한 것은 모두 선택 키다(없으면 dataclass 의 기본값 = 설계 v3 §8 의 값; 예전 설정 파일도 그대로 읽힌다):
+``languages.<언어>.env``·``halide_mode``, ``build.rust``·``build.sanitize_flags``, 최상위 ``halide``·``safety``·``lint``·
+``perf_summary``. 새 백엔드의 언어에만 필수인 것이 둘 있다: halide 는 ``halide_mode``, numba·halide·rust 는 ``env`` 의 스레드
+변수(``THREAD_ENV``)가 그 언어의 스레드 수와 같아야 한다.
 """
 
 from __future__ import annotations
@@ -24,12 +30,26 @@ from harness.paths import DEFAULT_EXPERIMENT_YAML, DEFAULT_MACHINE_YAML, resolve
 _LOG = "[config]"
 
 PROVIDERS = ("anthropic", "openai_compat", "dummy")
-BACKENDS = ("python", "c")
+BACKENDS = ("python", "c", "numba", "halide", "rust")
+HALIDE_MODES = ("auto", "manual")
 ARGS_MODES = ("positional", "keyword")
 GRAMMAR_HINTS = ("on", "off")
 FEEDBACKS = ("compiler", "compiler+lint")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MAX_TOKENS_PARAMS = ("max_tokens", "max_completion_tokens")
+
+# 수정 루프의 설계 상한(CLAUDE.md §1: 최대 3턴; ``turns_to_pass`` 는 0~3)
+MAX_REPAIR_TURNS = 3
+# ``load_config(overrides=…)`` 로 덮어쓸 수 있는 ``run.conditions`` 의 키
+CONDITION_KEYS = ("args", "grammar_hint", "feedback")
+# ``languages.<언어>.env`` 값에서 그 언어의 스레드 수로 치환되는 자리표시
+THREADS_PLACEHOLDER = "${threads}"
+# 백엔드의 런타임이 스레드 수를 읽는 환경변수(``OMP_NUM_THREADS`` 가 아니다). 언어의 ``env`` 가 이 변수를 그 언어의 스레드 수로
+# 주지 않으면 측정 스레드 수가 설정대로 고정되지 않고, 프롬프트의 "Thread count" 와 행의 ``threads`` 열이 사실이 아니게 된다
+# → 로더가 거부한다.
+THREAD_ENV: dict[str, str] = {"numba": "NUMBA_NUM_THREADS", "halide": "HL_NUM_THREADS", "rust": "RAYON_NUM_THREADS"}
+# 하네스가 스레드 수로 넣는 오토스케줄러 매개변수(설정에서 따로 주면 프롬프트의 서술과 어긋난다)
+HALIDE_RESERVED_PARAMS = ("parallelism",)
 
 # taskset -c 형식: "0,2,4,6", "0-3", "0-3,8" (공백 없음)
 _CPULIST_RE = re.compile(r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
@@ -92,6 +112,16 @@ class LanguageCfg:
     prompt: Path
     threads: int  # "measurement" 는 로더가 measurement.threads 정수로 치환한다
     openmp: bool = False
+    env: dict[str, str] = field(default_factory=dict)  # 워커에 더하는 환경변수(값의 ``${threads}`` 는 로더가 치환했다)
+    halide_mode: str | None = None  # halide 백엔드만: auto | manual
+
+
+@dataclass(frozen=True)
+class RustCfg:
+    cargo: str = "cargo"
+    rustflags: list[str] = field(default_factory=lambda: ["-C", "target-cpu=native"])
+    build_timeout_s: float = 600.0
+    offline: bool = True
 
 
 @dataclass(frozen=True)
@@ -105,6 +135,8 @@ class BuildCfg:
     compile_timeout_s: float
     forbidden_symbols: list[str]
     thread_symbols_prefix: list[str]
+    rust: RustCfg = field(default_factory=RustCfg)
+    sanitize_flags: list[str] = field(default_factory=lambda: ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"])
 
 
 @dataclass(frozen=True)
@@ -127,6 +159,9 @@ class MeasurementCfg:
     baseline_drift_pct_max: float
     correctness_tests: list[str]
     performance_test: str
+    # 선택: 동적 규약 검사 전에 1분 부하가 max_load_1m 아래로 내려가길 기다리는 상한(초). 0 = 기다리지 않는다(기존 절차).
+    # 측정 절차를 바꾸므로 사용자 확인 전에는 0 이다(기본값은 protocol.OPTION_DEFAULTS 와 같다).
+    max_settle_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -135,6 +170,32 @@ class PathsCfg:
     results_csv_dummy: Path
     raw_dir: Path
     built_dir: Path
+
+
+@dataclass(frozen=True)
+class HalideCfg:
+    autoscheduler: str = "Mullapudi2016"
+    autoscheduler_params: dict[str, str] = field(default_factory=dict)  # ``parallelism`` 은 하네스가 스레드 수로 넣는다
+
+
+@dataclass(frozen=True)
+class SafetyCfg:
+    """ASan/UBSan 재빌드·실행(C 백엔드만). 실험 때 켠다."""
+
+    enabled: bool = False
+    timeout_s: float = 300.0
+
+
+@dataclass(frozen=True)
+class LintCfg:
+    enabled: bool = True
+    plugin: Path = field(default_factory=lambda: resolve("plugins/lint/run_lint.py"))
+    timeout_s: float = 60.0
+
+
+@dataclass(frozen=True)
+class PerfSummaryCfg:
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -147,6 +208,10 @@ class Config:
     paths: PathsCfg
     source_path: Path = field(default=DEFAULT_EXPERIMENT_YAML)
     env_overrides: dict[str, str] = field(default_factory=dict)  # 적용된 환경변수 덮어쓰기 기록
+    halide: HalideCfg = field(default_factory=HalideCfg)
+    safety: SafetyCfg = field(default_factory=SafetyCfg)
+    lint: LintCfg = field(default_factory=LintCfg)
+    perf_summary: PerfSummaryCfg = field(default_factory=PerfSummaryCfg)
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -195,12 +260,14 @@ def _str(obj: dict[str, Any], path: str, key: str, *, allowed: tuple[str, ...] |
     return v
 
 
-def _int(obj: dict[str, Any], path: str, key: str, *, min_value: int | None = None) -> int:
+def _int(obj: dict[str, Any], path: str, key: str, *, min_value: int | None = None, max_value: int | None = None) -> int:
     v = obj[key]
     if isinstance(v, bool) or not isinstance(v, int):
         raise ConfigError(f"{path}.{key}: 정수여야 한다 (현재 {v!r})")
     if min_value is not None and v < min_value:
         raise ConfigError(f"{path}.{key}: {v} < 최소값 {min_value}")
+    if max_value is not None and v > max_value:
+        raise ConfigError(f"{path}.{key}: {v} > 최대값 {max_value}")
     return v
 
 
@@ -230,20 +297,43 @@ def _str_list(obj: dict[str, Any], path: str, key: str, *, nonempty: bool = Fals
     return list(v)
 
 
+def _str_map(raw: Any, path: str) -> dict[str, str]:
+    """문자열 → 스칼라 매핑을 문자열 → 문자열로 읽는다(환경변수·오토스케줄러 매개변수).
+
+    YAML 에서 따옴표를 빼먹어 불리언이 된 값은 ``"true"``/``"false"`` 로 정규화한다(``omp_env_extra`` 와 같은 규칙).
+    """
+    obj = _require_mapping(raw, path)
+    out: dict[str, str] = {}
+    for k, v in obj.items():
+        if not isinstance(k, str) or not k:
+            raise ConfigError(f"{path}: 키는 비어 있지 않은 문자열이어야 한다 ({k!r})")
+        if isinstance(v, bool):
+            v = "true" if v else "false"
+        elif not isinstance(v, (str, int, float)):
+            raise ConfigError(f"{path}.{k}: 문자열 또는 숫자여야 한다 (현재 {v!r})")
+        out[k] = str(v)
+    return out
+
+
 # ----------------------------------------------------------------------------- section parsers
 
 
-def _parse_run(raw: Any) -> RunCfg:
+def _parse_run(raw: Any, overrides: dict[str, str | None] | None) -> RunCfg:
     p = "run"
     obj = _require_mapping(raw, p)
     _check_keys(obj, p, ("tasks", "languages", "n_samples", "max_repair_turns", "conditions"))
-    cond = _require_mapping(obj["conditions"], f"{p}.conditions")
-    _check_keys(cond, f"{p}.conditions", ("args", "grammar_hint", "feedback"))
+    cond = dict(_require_mapping(obj["conditions"], f"{p}.conditions"))
+    _check_keys(cond, f"{p}.conditions", CONDITION_KEYS)
+    for key, value in (overrides or {}).items():
+        if key not in CONDITION_KEYS:
+            raise ConfigError(f"overrides: 알 수 없는 조건 {key!r} (허용: {list(CONDITION_KEYS)})")
+        if value is not None:
+            cond[key] = value  # 아래의 허용값 검사를 그대로 거친다
     return RunCfg(
         tasks=_str_list(obj, p, "tasks", nonempty=True),
         languages=_str_list(obj, p, "languages", nonempty=True),
         n_samples=_int(obj, p, "n_samples", min_value=1),
-        max_repair_turns=_int(obj, p, "max_repair_turns", min_value=0),
+        max_repair_turns=_int(obj, p, "max_repair_turns", min_value=0, max_value=MAX_REPAIR_TURNS),
         conditions=ConditionsCfg(
             args=_str(cond, f"{p}.conditions", "args", allowed=ARGS_MODES),
             grammar_hint=_str(cond, f"{p}.conditions", "grammar_hint", allowed=GRAMMAR_HINTS),
@@ -325,6 +415,18 @@ def _parse_model(raw: Any, env_overrides: dict[str, str]) -> ModelCfg:
     )
 
 
+def _parse_language_env(raw: Any, path: str, threads: int) -> dict[str, str]:
+    """``languages.<언어>.env``: 값의 ``${threads}`` 를 그 언어의 스레드 수로 치환한다. 그 밖의 ``${…}`` 는 오타로 보고 거부한다
+    (치환되지 않은 자리표시가 워커 환경에 그대로 들어가면 런타임이 조용히 기본 스레드 수로 돈다)."""
+    out: dict[str, str] = {}
+    for key, value in _str_map(raw, path).items():
+        value = value.replace(THREADS_PLACEHOLDER, str(threads))
+        if "${" in value:
+            raise ConfigError(f"{path}.{key}: 알 수 없는 자리표시 {value!r} (쓸 수 있는 것: {THREADS_PLACEHOLDER})")
+        out[key] = value
+    return out
+
+
 def _parse_languages(raw: Any, measurement_threads: int) -> dict[str, LanguageCfg]:
     p = "languages"
     obj = _require_mapping(raw, p)
@@ -334,7 +436,7 @@ def _parse_languages(raw: Any, measurement_threads: int) -> dict[str, LanguageCf
     for name, body in obj.items():
         lp = f"{p}.{name}"
         b = _require_mapping(body, lp)
-        _check_keys(b, lp, ("backend", "prompt", "threads"), optional=("openmp",))
+        _check_keys(b, lp, ("backend", "prompt", "threads"), optional=("openmp", "env", "halide_mode"))
         threads_raw = b["threads"]
         if threads_raw == "measurement":
             threads = measurement_threads
@@ -343,14 +445,45 @@ def _parse_languages(raw: Any, measurement_threads: int) -> dict[str, LanguageCf
         else:
             raise ConfigError(f"{lp}.threads: 'measurement' 또는 양의 정수여야 한다 (현재 {threads_raw!r})")
         openmp = _bool(b, lp, "openmp") if "openmp" in b else False
+        backend = _str(b, lp, "backend", allowed=BACKENDS)
+        halide_mode: str | None = None
+        if backend == "halide":
+            if "halide_mode" not in b:
+                raise ConfigError(f"{lp}.halide_mode: halide 백엔드에는 필수다 ({list(HALIDE_MODES)} 중 하나)")
+            halide_mode = _str(b, lp, "halide_mode", allowed=HALIDE_MODES)
+        elif "halide_mode" in b:
+            raise ConfigError(f"{lp}.halide_mode: halide 백엔드에서만 쓴다 (backend={backend!r})")
+        env = _parse_language_env(b["env"], f"{lp}.env", threads) if "env" in b else {}
+        thread_env = THREAD_ENV.get(backend)
+        if thread_env is not None and env.get(thread_env) != str(threads):
+            raise ConfigError(f'{lp}.env.{thread_env}: {backend} 백엔드는 이 변수가 그 언어의 스레드 수({threads})여야 한다 '
+                              f'(현재 {env.get(thread_env)!r}; "{THREADS_PLACEHOLDER}" 로 쓴다)')
         out[name] = LanguageCfg(
             name=str(name),
-            backend=_str(b, lp, "backend", allowed=BACKENDS),
+            backend=backend,
             prompt=resolve(_str(b, lp, "prompt")),
             threads=threads,
             openmp=openmp,
+            env=env,
+            halide_mode=halide_mode,
         )
     return out
+
+
+def _parse_rust(raw: Any) -> RustCfg:
+    p = "build.rust"
+    obj = _require_mapping(raw, p)
+    _check_keys(obj, p, (), optional=("cargo", "rustflags", "build_timeout_s", "offline"))
+    kwargs: dict[str, Any] = {}
+    if "cargo" in obj:
+        kwargs["cargo"] = _str(obj, p, "cargo")
+    if "rustflags" in obj:
+        kwargs["rustflags"] = _str_list(obj, p, "rustflags")
+    if "build_timeout_s" in obj:
+        kwargs["build_timeout_s"] = _num(obj, p, "build_timeout_s", min_value=0.0, exclusive=True)
+    if "offline" in obj:
+        kwargs["offline"] = _bool(obj, p, "offline")
+    return RustCfg(**kwargs)
 
 
 def _parse_build(raw: Any) -> BuildCfg:
@@ -360,7 +493,13 @@ def _parse_build(raw: Any) -> BuildCfg:
         obj,
         p,
         ("cc", "cflags", "base_flags", "openmp_flag", "ldflags", "diag_flags", "compile_timeout_s", "forbidden_symbols", "thread_symbols_prefix"),
+        optional=("rust", "sanitize_flags"),
     )
+    kwargs: dict[str, Any] = {}
+    if "rust" in obj:
+        kwargs["rust"] = _parse_rust(obj["rust"])
+    if "sanitize_flags" in obj:
+        kwargs["sanitize_flags"] = _str_list(obj, p, "sanitize_flags", nonempty=True)
     return BuildCfg(
         cc=_str(obj, p, "cc"),
         cflags=_str_list(obj, p, "cflags"),
@@ -371,6 +510,7 @@ def _parse_build(raw: Any) -> BuildCfg:
         compile_timeout_s=_num(obj, p, "compile_timeout_s", min_value=0.0, exclusive=True),
         forbidden_symbols=_str_list(obj, p, "forbidden_symbols"),
         thread_symbols_prefix=_str_list(obj, p, "thread_symbols_prefix"),
+        **kwargs,
     )
 
 
@@ -386,7 +526,11 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
             "require_performance_governor", "baseline_min_gflops", "baseline_drift_pct_max", "correctness_tests",
             "performance_test",
         ),
+        optional=("max_settle_s",),
     )
+    kwargs: dict[str, Any] = {}
+    if "max_settle_s" in obj:
+        kwargs["max_settle_s"] = _num(obj, p, "max_settle_s", min_value=0.0)
     cores = str(obj["cores"]).strip()
     single_core = str(obj["single_core"]).strip()
     try:
@@ -434,6 +578,7 @@ def _parse_measurement(raw: Any) -> MeasurementCfg:
         baseline_drift_pct_max=_num(obj, p, "baseline_drift_pct_max", min_value=0.0),
         correctness_tests=_str_list(obj, p, "correctness_tests", nonempty=True),
         performance_test=_str(obj, p, "performance_test"),
+        **kwargs,
     )
 
 
@@ -449,11 +594,65 @@ def _parse_paths(raw: Any) -> PathsCfg:
     )
 
 
+def _parse_halide(raw: Any) -> HalideCfg:
+    p = "halide"
+    obj = _require_mapping(raw, p)
+    _check_keys(obj, p, (), optional=("autoscheduler", "autoscheduler_params"))
+    kwargs: dict[str, Any] = {}
+    if "autoscheduler" in obj:
+        kwargs["autoscheduler"] = _str(obj, p, "autoscheduler")
+    if "autoscheduler_params" in obj:
+        params = _str_map(obj["autoscheduler_params"], f"{p}.autoscheduler_params")
+        reserved = [k for k in params if k in HALIDE_RESERVED_PARAMS]
+        if reserved:
+            raise ConfigError(f"{p}.autoscheduler_params: {reserved} 는 하네스가 그 언어의 스레드 수로 넣는다 (설정에서 줄 수 없다)")
+        kwargs["autoscheduler_params"] = params
+    return HalideCfg(**kwargs)
+
+
+def _parse_safety(raw: Any) -> SafetyCfg:
+    p = "safety"
+    obj = _require_mapping(raw, p)
+    _check_keys(obj, p, (), optional=("enabled", "timeout_s"))
+    kwargs: dict[str, Any] = {}
+    if "enabled" in obj:
+        kwargs["enabled"] = _bool(obj, p, "enabled")
+    if "timeout_s" in obj:
+        kwargs["timeout_s"] = _num(obj, p, "timeout_s", min_value=0.0, exclusive=True)
+    return SafetyCfg(**kwargs)
+
+
+def _parse_lint(raw: Any) -> LintCfg:
+    p = "lint"
+    obj = _require_mapping(raw, p)
+    _check_keys(obj, p, (), optional=("enabled", "plugin", "timeout_s"))
+    kwargs: dict[str, Any] = {}
+    if "enabled" in obj:
+        kwargs["enabled"] = _bool(obj, p, "enabled")
+    if "plugin" in obj:
+        kwargs["plugin"] = resolve(_str(obj, p, "plugin"))
+    if "timeout_s" in obj:
+        kwargs["timeout_s"] = _num(obj, p, "timeout_s", min_value=0.0, exclusive=True)
+    return LintCfg(**kwargs)
+
+
+def _parse_perf_summary(raw: Any) -> PerfSummaryCfg:
+    p = "perf_summary"
+    obj = _require_mapping(raw, p)
+    _check_keys(obj, p, (), optional=("enabled",))
+    return PerfSummaryCfg(enabled=_bool(obj, p, "enabled")) if "enabled" in obj else PerfSummaryCfg()
+
+
 # ----------------------------------------------------------------------------- public API
 
 
-def load_config(path: Path | None = None) -> Config:
-    """``experiment.yaml`` 을 읽어 검증된 ``Config`` 를 돌려준다. 실패하면 ``ConfigError``."""
+def load_config(path: Path | None = None, *, overrides: dict[str, str | None] | None = None) -> Config:
+    """``experiment.yaml`` 을 읽어 검증된 ``Config`` 를 돌려준다. 실패하면 ``ConfigError``.
+
+    ``overrides`` 는 ``run.conditions`` 의 조건 값을 덮어쓴다(CLI 의 ``--args``·``--grammar-hint``·``--feedback``):
+    ``{"args": …, "grammar_hint": …, "feedback": …}`` 중 주어진 키만, 값이 None 인 키는 설정 파일의 값을 그대로 둔다.
+    덮어쓴 값도 설정 파일의 값과 같은 허용값 검사를 거친다.
+    """
     src = Path(path) if path is not None else DEFAULT_EXPERIMENT_YAML
     src = resolve(src)
     try:
@@ -464,10 +663,11 @@ def load_config(path: Path | None = None) -> Config:
     except yaml.YAMLError as e:
         raise ConfigError(f"(file): YAML 구문 오류 {src}: {e}") from None
     top = _require_mapping(raw, "(top)")
-    _check_keys(top, "(top)", ("run", "model", "languages", "build", "measurement", "paths"))
+    _check_keys(top, "(top)", ("run", "model", "languages", "build", "measurement", "paths"),
+                optional=("halide", "safety", "lint", "perf_summary"))
 
     env_overrides: dict[str, str] = {}
-    run = _parse_run(top["run"])
+    run = _parse_run(top["run"], overrides)
     model = _parse_model(top["model"], env_overrides)
     measurement = _parse_measurement(top["measurement"])
     languages = _parse_languages(top["languages"], measurement.threads)
@@ -489,6 +689,10 @@ def load_config(path: Path | None = None) -> Config:
         paths=paths,
         source_path=src,
         env_overrides=env_overrides,
+        halide=_parse_halide(top["halide"]) if "halide" in top else HalideCfg(),
+        safety=_parse_safety(top["safety"]) if "safety" in top else SafetyCfg(),
+        lint=_parse_lint(top["lint"]) if "lint" in top else LintCfg(),
+        perf_summary=_parse_perf_summary(top["perf_summary"]) if "perf_summary" in top else PerfSummaryCfg(),
     )
 
 
@@ -546,4 +750,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # 스냅샷의 경로·설정 원문에 로캘 코드페이지로 찍을 수 없는 글자가 있을 수 있다 → 스트림을 정리한다(진입점에서만).
+    from harness.procutil import setup_stdio
+
+    setup_stdio()
     sys.exit(main())

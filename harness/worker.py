@@ -1,37 +1,68 @@
-"""워커 (설계 §8): LLM 코드를 실행하는 **유일한** 곳. run.py 가 ``procutil.run_isolated`` 로 띄운다.
+"""워커 (설계 §8, v3 §5): LLM 코드를 실행하는 **유일한** 곳. run.py 가 ``procutil.run_isolated`` 로 띄운다.
 
-    PYTHON_EXE -m harness.worker --backend {c,python} --artifact PATH --mode {import,check,bench}
+    PYTHON_EXE -m harness.worker --backend {c,python,numba,halide} --artifact PATH --mode {import,check,bench}
         --tests tiny.npz,rect.npz,small.npz --tolerance tasks/<task>/tolerance.yaml --signatures tasks/<task>/signatures.yaml --out result.json
-        [--check-repeats 2] [--warmup 3 --repeats 10 --min-repeats 3 --budget-s 300] [--args-mode positional] [--max-mem-gb 8]
+        [--check-repeats 2] [--warmup 3 --repeats 10 --min-repeats 3 --budget-s 300] [--args-mode positional|keyword]
+        [--halide-mode auto|manual] [--halide-autoscheduler Mullapudi2016] [--halide-params JSON] [--threads N]
+        [--inspect] [--inspect-dims JSON] [--max-mem-gb 8] [--sanitize]
 
 - 시작: ``prctl(PR_SET_DUMPABLE=0)`` (코어 덤프/apport 차단), ``RLIMIT_AS`` (max_mem_gb). 적용값은 ``limits``,
   런타임 BLAS 정체는 ``blas`` 에 기록한다.
 - 결과 파일은 매 커널 호출 직전과 매 테스트/호출 뒤에 원자적으로 갱신한다(``complete``, ``in_progress``).
   워커 자체의 예외(하네스 버그)는 ``worker_error`` 로 기록하고 rc=3 으로 끝난다.
-- 모든 배열은 64바이트 정렬 + 가드 영역(센티널) 위에 만든다. 호출 전 입력을 복원하고 C 를 센티널로 채운다.
+- 커널을 로드하고 부르는 방법은 ``harness.kernels`` 가 백엔드별로 감춘다(c: ctypes — Rust 산출물도 C ABI 라 ``--backend c``,
+  python·numba: 모듈의 함수, halide: 형태마다 빌드하는 파이프라인). 이 모듈은 프로세스 수준의 일(제한, 버퍼, 결과 문서,
+  측정 루프)만 한다. 백엔드 준비(``kernels.open_backend``: LLM 코드를 실행하기 전의 도구 임포트·numba 스레딩 계층 시작·
+  오토스케줄러 시험)에서 프로세스가 죽으면 도구·설정 문제이므로, 그 구간 동안 결과 문서에 ``worker_error`` 를 미리 써 둔다
+  (``harness_only``).
+- 모든 배열은 64바이트 정렬 + 가드 영역(센티널) 위에 만든다. 호출 전 입력을 복원하고 출력을 센티널로 채운다.
+  ``--sanitize`` (ASan 재빌드 실행용)면 배열마다 C 할당자로 정확히 n 원소만 잡는다(64바이트 정렬 시작, 앞 여유·뒤 가드
+  없음): 가드가 같은 malloc 블록 안이면 하네스 배열을 조금 넘는 접근이 ASan 에게 정상 접근으로 보이기 때문이다.
+  이 모드에서는 가드 검사(``oob_write``)가 늘 False 다 — 판정은 쓰지 않고 새니타이저 보고만 센다.
 - stdout 에는 아무것도 쓰지 않는다(커널의 stdout 은 run.py 가 파일로 받아 contract_violation 을 본다). 입력 배열은 덤프하지 않는다.
+- 정수 출력(설계 v3 §5.4): 출력 dtype 이 int32 면 참조(``<out>_ref``)도 int32 로 읽고, ``tolerance.yaml`` 이
+  ``compare: exact`` 면 실행 간 비교도 정확 비교(``array_equal``)다. 가드·센티널 채움은 dtype 에 맞춘다.
+- 형태별 빌드가 있는 백엔드(halide; v3 §5.3): import 모드는 ``--tests`` 의 첫 테스트 크기로 빌드·JIT 까지 해 보고(실패 →
+  ``load_ok=false``), check/bench 는 테스트마다 빌드한 뒤 호출한다. 빌드 시간은 측정에 넣지 않고 ``build_ms`` 로 남긴다.
+  check/bench 에서 빌드가 실패하면 그 테스트의 ``runtime_crash`` 다(커널이 예외를 올린 호출과 같은 꼴의 기록).
+- ``--inspect`` (import 모드): 컴파일 결과의 관찰값을 ``inspect`` 에 넣는다(numba: 서명·병렬 진단·스레딩 계층·스레드 수,
+  halide: 루프 중첩·스케줄 — ``--inspect-dims`` 가 있으면 그 크기(성능 형태)의 것). 수집 실패는 ``inspect.inspect_error`` 에
+  남기고 워커는 계속한다. 수집 중에는 ``in_progress.test == "inspect"`` 이고 문서에 이미 ``load_ok=true`` 와 판정이 있다:
+  그 상태로 프로세스가 끝났다면(성능 형태의 빌드가 죽거나 시간 상한에 걸림) 로드 실패가 아니라 관찰 실패다.
+- 결과 문서의 추가 키(v3): ``backend_detail`` (받은 백엔드 설정), ``inspect``, ``build_ms`` (check 는 테스트별, import·bench 는
+  최상위), 로드 실패가 예외에서 왔으면 ``exception`` (``{type, message, traceback}``).
+- ``--max-mem-gb`` 가 0 이하면 ``RLIMIT_AS`` 를 걸지 않는다(ASan 실행용; ``limits.disabled``).
+- 비-Linux(개발용 Windows; 설계 v3 §5.6): ``resource``·``prctl``·``os.getloadavg``·``os.sched_getaffinity`` 가 없어도
+  임포트·실행된다(제한은 걸리지 않고 ``limits.unsupported``, 값은 None/빈 리스트). Linux 동작은 그대로다.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
-import importlib.util
-import inspect
+import functools
+import json
 import math
 import os
-import resource
 import sys
 import time
 import traceback
-from ctypes import POINTER, c_float, c_int, c_int32
+import weakref
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
-from harness.classify import Tolerance, aggregate_sample, classify_task, load_tolerance
+try:
+    import resource
+except ImportError:  # 비-Linux(Windows): RLIMIT_AS 를 걸 수 없다 → apply_memory_limit 이 unsupported 로 기록한다
+    resource = None  # type: ignore[assignment]
+
+from harness import kernels
+from harness.classify import COMPARE_EXACT, Tolerance, aggregate_sample, classify_task, load_tolerance
 from harness.paths import atomic_write_json
 from harness.protocol import blas_identity
 from harness.taskspec import TaskSpec, load_taskspec
@@ -41,11 +72,13 @@ _LOG = "[worker]"
 WORKER_ERROR_RC = 3
 PR_SET_DUMPABLE = 4
 ALIGNMENT_BYTES = 64
-ALIGN_SLACK_FLOATS = 16  # 64 바이트 정렬을 위한 여유(float32 16개 = 64 B)
 GUARD_INPUT = 1024
 GUARD_OUTPUT_EXTRA = 1024
-TRACEBACK_TAIL_CHARS = 2000
+WORKER_ERROR_TAIL_CHARS = 4000
 BUDGET_FRACTION = 0.8
+# import 모드에서 ``--inspect`` 수집 중일 때의 ``in_progress.test`` 와, 수집이 끝나기 전에 문서에 써 두는 ``inspect_error``
+INSPECT_STEP = "inspect"
+INSPECT_UNFINISHED = "inspect did not finish: the worker process ended while collecting"
 
 SYS_CPU = Path("/sys/devices/system/cpu")
 THERMAL_DIR = Path("/sys/class/thermal")
@@ -61,7 +94,7 @@ def disable_core_dumps() -> int | None:
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         rc = int(libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0))
-    except (OSError, AttributeError) as e:
+    except (OSError, AttributeError, TypeError) as e:  # TypeError: Windows 의 ctypes 는 CDLL(None) 을 받지 않는다
         print(f"{_LOG} 경고: prctl(PR_SET_DUMPABLE) 실패: {e}", file=sys.stderr)
         return None
     if rc != 0:
@@ -71,7 +104,25 @@ def disable_core_dumps() -> int | None:
 
 
 def apply_memory_limit(max_mem_gb: float) -> dict[str, Any]:
-    """``RLIMIT_AS`` 를 max_mem_gb(GiB)로 제한한다(하드 한도보다 크면 하드 한도). 적용값을 돌려준다."""
+    """``RLIMIT_AS`` 를 max_mem_gb(GiB)로 제한한다(하드 한도보다 크면 하드 한도). 적용값을 돌려준다.
+
+    - ``max_mem_gb <= 0``: 제한을 걸지 않는다(ASan 은 수 TiB 의 가상 주소 공간을 예약하므로 RLIMIT_AS 아래에서 뜨지 않는다).
+      ``setrlimit`` 을 부르지 않으며 ``{"rlimit_as_bytes": <실제로 걸려 있는 soft 한도 | None>, "rlimit_as_requested_bytes": None,
+      …, "disabled": True}``. ``rlimit_as_bytes`` 는 다른 분기와 같이 **지금 걸려 있는 값**이다: 오케스트레이터를 띄운 셸의
+      ``ulimit -v`` 처럼 물려받은 soft 한도가 있으면 그 값이 남는다(없으면 None) — "제한 없음"이라고 잘못 기록하지 않는다.
+    - ``resource`` 모듈이 없는 플랫폼(Windows): ``{"rlimit_as_bytes": None, "unsupported": True}`` + 경고.
+    """
+    if resource is None:
+        print(f"{_LOG} 경고: 이 플랫폼({sys.platform})에는 resource 모듈이 없어 RLIMIT_AS 를 걸지 않는다", file=sys.stderr)
+        return {"rlimit_as_bytes": None, "unsupported": True}
+    if max_mem_gb <= 0:
+        soft0, hard0 = resource.getrlimit(resource.RLIMIT_AS)
+        return {
+            "rlimit_as_bytes": None if soft0 == resource.RLIM_INFINITY else soft0,
+            "rlimit_as_requested_bytes": None,
+            "rlimit_as_hard_bytes": None if hard0 == resource.RLIM_INFINITY else hard0,
+            "disabled": True,
+        }
     requested = int(max_mem_gb * (1024**3))
     soft, hard = resource.getrlimit(resource.RLIMIT_AS)
     target = requested if hard == resource.RLIM_INFINITY else min(requested, hard)
@@ -87,86 +138,6 @@ def apply_memory_limit(max_mem_gb: float) -> dict[str, Any]:
         "rlimit_as_requested_bytes": requested,
         "rlimit_as_hard_bytes": None if hard == resource.RLIM_INFINITY else hard,
     }
-
-
-# ----------------------------------------------------------------------------- 커널 로드
-
-
-@dataclass
-class KernelHandle:
-    """로드된 커널: 백엔드별 호출 방식을 감춘다."""
-
-    backend: str
-    fn: Callable[..., Any]
-    args_mode: str
-
-    def invoke(self, bufs: "Buffers") -> Any:
-        """커널을 한 번 호출한다. 반환값은 python 백엔드의 것(그 외 None)."""
-        if self.backend == "c":
-            self.fn(*bufs.c_args)
-            return None
-        if self.args_mode == "keyword":
-            return self.fn(**dict(zip(bufs.names, bufs.py_args)))
-        return self.fn(*bufs.py_args)
-
-
-def _safe_str(e: BaseException) -> str:
-    """``str(e)``. 커널이 올린 예외 객체의 ``__str__`` 자체가 예외를 던지면(LLM 코드) ``<unprintable Type>`` —
-    BaseException 핸들러가 다시 죽어 worker_error(rc=3, run 중단)가 되지 않도록 한다."""
-    try:
-        return str(e)
-    except BaseException:  # __str__ 이 SystemExit 등을 올려도 워커는 살아야 한다
-        return f"<unprintable {type(e).__name__}>"
-
-
-def _safe_format_exc() -> str:
-    """``traceback.format_exc()``; 포맷 중 예외(커널 예외 객체의 속성이 던지는 경우)면 자리표시 문자열."""
-    try:
-        return traceback.format_exc()
-    except BaseException:
-        return "<traceback unavailable>"
-
-
-def _one_line(e: BaseException) -> str:
-    """예외를 한 줄 ``Type: message`` 로."""
-    msg = _safe_str(e).strip().splitlines()
-    return f"{type(e).__name__}: {msg[0] if msg else ''}".rstrip(": ")[:500]
-
-
-def load_kernel(backend: str, artifact: Path, args_mode: str, spec: TaskSpec) -> tuple[KernelHandle | None, str, str]:
-    """커널을 로드한다 → ``(handle, classification, detail)``. 실패하면 handle=None,
-    classification ∈ ``compile_error`` | ``signature_mismatch``."""
-    if backend == "c":
-        try:
-            lib = ctypes.CDLL(str(artifact))
-        except OSError as e:
-            return None, "compile_error", _one_line(e)
-        try:
-            fn = getattr(lib, spec.function)
-        except AttributeError as e:
-            return None, "signature_mismatch", f"symbol {spec.function} not found: {e}"[:500]
-        fn.argtypes = [c_int if a.kind == "dim" else POINTER(C_TYPES[a.dtype]) for a in spec.args]
-        fn.restype = None
-        return KernelHandle("c", fn, args_mode), "", ""
-
-    mspec = importlib.util.spec_from_file_location("kernel", str(artifact))
-    if mspec is None or mspec.loader is None:
-        return None, "compile_error", f"cannot create module spec for {artifact}"
-    module = importlib.util.module_from_spec(mspec)
-    sys.modules["kernel"] = module
-    try:
-        mspec.loader.exec_module(module)
-    except BaseException as e:  # SystemExit/KeyboardInterrupt 도 임포트 실패로 본다
-        return None, "compile_error", _one_line(e)
-    name = spec.function
-    fn = getattr(module, name, None)
-    if fn is None:
-        return None, "signature_mismatch", f"module has no attribute {name}"
-    if not callable(fn):
-        return None, "signature_mismatch", f"{name} is not callable ({type(fn).__name__})"
-    if inspect.iscoroutinefunction(fn):
-        return None, "signature_mismatch", f"{name} is a coroutine function (async def)"
-    return KernelHandle("python", fn, args_mode), "", ""
 
 
 # ----------------------------------------------------------------------------- 버퍼
@@ -187,8 +158,9 @@ class AlignedArray:
         return self.base[self.offset : self.offset + self.n + self.guard.size]
 
 
-C_TYPES = {"float32": c_float, "int32": c_int32}
 NP_TYPES = {"float32": np.float32, "int32": np.int32}
+# 출력 dtype → 참조(``<out>_ref``) dtype: float 출력은 float64 누적 참조, int32 출력은 int32 그대로(설계 v3 §2.4·§5.4)
+REF_NP_TYPES = {"float32": np.float64, "int32": np.int32}
 
 
 def alloc_aligned(n: int, guard: int, sentinel: float, dtype: Any = np.float32) -> AlignedArray:
@@ -196,7 +168,8 @@ def alloc_aligned(n: int, guard: int, sentinel: float, dtype: Any = np.float32) 
     dt = np.dtype(dtype)
     base = np.empty(n + ALIGNMENT_BYTES // dt.itemsize + guard, dtype=dt)
     off = (-base.ctypes.data % ALIGNMENT_BYTES) // dt.itemsize
-    view = base[off : off + n]
+    # 먼저 오프셋만큼 옮기고 길이를 자른다: 길이 0 인 조각(base[off:off])은 NumPy 가 데이터 포인터를 옮기지 않아 정렬되지 않는다.
+    view = base[off:][:n]
     guard_view = base[off + n : off + n + guard]
     guard_view[...] = dt.type(sentinel)
     if view.ctypes.data % ALIGNMENT_BYTES != 0:
@@ -204,39 +177,96 @@ def alloc_aligned(n: int, guard: int, sentinel: float, dtype: Any = np.float32) 
     return AlignedArray(view=view, base=base, guard=guard_view, offset=off, n=n)
 
 
-class Buffers:
-    """테스트 하나의 입력·출력 버퍼(정렬 + 가드)와 참조, 복원·검사 헬퍼. 인자 구성은 ``TaskSpec`` 이 정한다."""
+@functools.cache
+def c_aligned_allocator() -> tuple[Callable[[int], int], Callable[[int], None]]:
+    """C 할당자의 ``(alloc(size) -> 주소, free(주소))`` (정렬 ALIGNMENT_BYTES).
 
-    def __init__(self, spec: TaskSpec, data: dict[str, Any], sentinel: float) -> None:
+    POSIX 는 프로세스 전역 심볼의 ``posix_memalign``/``free`` 다: LD_PRELOAD 로 올린 ASan 이 가로채 블록 크기를 정확히
+    안다(``aligned_alloc`` 은 ASan 이 크기가 정렬의 배수가 아니면 오류로 멈추므로 쓰지 않는다). Windows(개발 머신의 단위
+    테스트)는 ucrtbase 의 ``_aligned_malloc``/``_aligned_free`` 다."""
+    if sys.platform == "win32":
+        crt = ctypes.CDLL("ucrtbase")
+        aligned_malloc = crt._aligned_malloc
+        aligned_malloc.restype = ctypes.c_void_p
+        aligned_malloc.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+        aligned_free = crt._aligned_free
+        aligned_free.restype = None
+        aligned_free.argtypes = [ctypes.c_void_p]
+
+        def alloc_win(size: int) -> int:
+            return aligned_malloc(size, ALIGNMENT_BYTES) or 0
+
+        return alloc_win, aligned_free
+    libc = ctypes.CDLL(None)
+    posix_memalign = libc.posix_memalign
+    posix_memalign.restype = ctypes.c_int
+    posix_memalign.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t]
+    c_free = libc.free
+    c_free.restype = None
+    c_free.argtypes = [ctypes.c_void_p]
+
+    def alloc_posix(size: int) -> int:
+        ptr = ctypes.c_void_p()
+        rc = posix_memalign(ctypes.byref(ptr), ALIGNMENT_BYTES, size)
+        return (ptr.value or 0) if rc == 0 else 0
+
+    return alloc_posix, c_free
+
+
+def alloc_exact(n: int, dtype: Any = np.float32) -> AlignedArray:
+    """``--sanitize`` 모드의 배열: C 할당자로 정확히 n 원소를 잡는다(시작은 64바이트 정렬, 앞 여유·뒤 가드 없음).
+
+    마지막 원소가 할당 블록의 끝이라 하네스 배열을 한 칸이라도 넘는 읽기·쓰기를 ASan 이 heap-buffer-overflow 로 본다.
+    가드는 빈 배열이다(``oob_write`` 는 늘 False). 블록은 이 뷰를 잡은 마지막 참조가 사라질 때 해제한다(테스트가 끝나
+    ``Buffers`` 를 버리고 커널 핸들이 다음 테스트의 뷰로 바꾼 뒤). 길이 0 배열도 유효한 주소를 받도록 1바이트를 잡는다."""
+    dt = np.dtype(dtype)
+    size = max(n * dt.itemsize, 1)
+    alloc, free = c_aligned_allocator()
+    ptr = alloc(size)
+    if not ptr:
+        raise MemoryError(f"alloc_exact: C 할당 실패 ({size} bytes)")
+    block = type("CBlock", (ctypes.c_char * size,), {}).from_address(ptr)
+    weakref.finalize(block, free, ptr)
+    view = np.frombuffer(block, dtype=dt, count=n)
+    if view.ctypes.data % ALIGNMENT_BYTES != 0:
+        raise RuntimeError("alloc_exact: 정렬 실패")
+    return AlignedArray(view=view, base=view, guard=view[n:], offset=0, n=n)
+
+
+class Buffers:
+    """테스트 하나의 입력·출력 버퍼(정렬 + 가드)와 참조, 복원·검사 헬퍼. 인자 구성은 ``TaskSpec`` 이 정한다.
+
+    ``sanitize`` 면 배열마다 ``alloc_exact`` (정확 크기, 가드 없음)로 만든다. 출력의 센티널 채움은 그대로다."""
+
+    def __init__(self, spec: TaskSpec, data: dict[str, Any], sentinel: float, *, sanitize: bool = False) -> None:
         self.spec = spec
         self.sentinel = float(sentinel)
         self.dims: dict[str, int] = {n: int(data[n]) for n in spec.dim_names}
-        self.names = spec.params
         self.arrays: dict[str, AlignedArray] = {}
+        # 커널에 넘어가는 배열: 인자 이름 → 과제 형태의 N-D 뷰(복사 없음). 호출 방식은 harness.kernels 의 백엔드가 정한다.
+        self.views: dict[str, np.ndarray] = {}
         self.inputs0: dict[str, np.ndarray] = {}
-        self.py_args: list[Any] = []
-        self.c_args: list[Any] = []
         for arg in spec.args:
             if arg.kind == "dim":
-                self.py_args.append(self.dims[arg.name])
-                self.c_args.append(self.dims[arg.name])
                 continue
             shape = spec.shape_of(arg, self.dims)
             n = int(np.prod(shape))
             dt = NP_TYPES[arg.dtype]
             if arg.kind == "in":
-                arr = alloc_aligned(n, GUARD_INPUT, sentinel, dt)
+                arr = alloc_exact(n, dt) if sanitize else alloc_aligned(n, GUARD_INPUT, sentinel, dt)
                 arr.view[...] = np.asarray(data[arg.name], dtype=dt).reshape(-1)
                 self.inputs0[arg.name] = arr.view.copy()
+            elif sanitize:
+                arr = alloc_exact(n, dt)
             else:
                 arr = alloc_aligned(n, spec.guard_extra_of(self.dims) + GUARD_OUTPUT_EXTRA, sentinel, dt)
             self.arrays[arg.name] = arr
-            # python 백엔드용 다차원 뷰(복사 없음)와 c 백엔드용 포인터
-            self.py_args.append(arr.view.reshape(shape))
-            self.c_args.append(arr.view.ctypes.data_as(POINTER(C_TYPES[arg.dtype])))
+            self.views[arg.name] = arr.view.reshape(shape)
         out_arg = spec.output
         self.out = self.arrays[out_arg.name]
-        self.ref = np.ascontiguousarray(data[f"{out_arg.name}_ref"], dtype=np.float64).reshape(spec.shape_of(out_arg, self.dims))
+        # 참조: float 출력은 float64, int32 출력은 int32(정확 비교; float64 로 올리지 않는다)
+        self.ref = np.ascontiguousarray(data[f"{out_arg.name}_ref"], dtype=REF_NP_TYPES[out_arg.dtype]).reshape(
+            spec.shape_of(out_arg, self.dims))
 
     def restore_inputs(self) -> None:
         for name, orig in self.inputs0.items():
@@ -256,15 +286,22 @@ class Buffers:
 
 
 def load_test(path: Path, spec: TaskSpec) -> dict[str, Any]:
-    """테스트 npz 를 읽는다: 인자 이름의 배열·dim 스칼라와 ``<out>_ref``. 형태를 과제 명세와 대조한다."""
+    """테스트 npz 를 읽는다: 인자 이름의 배열·dim 스칼라와 ``<out>_ref``. 형태를 과제 명세와 대조한다.
+
+    참조 dtype 은 출력 dtype 이 정한다(float32 → float64, int32 → int32). 정수 출력의 참조가 정수형으로 저장돼 있지
+    않으면(잘못 만든 테스트 파일) 조용히 잘라내지 않고 ``ValueError`` 로 멈춘다."""
     out_arg = spec.output
+    ref_key = f"{out_arg.name}_ref"
     data: dict[str, Any] = {}
     with np.load(path) as npz:
         for name in spec.dim_names:
             data[name] = int(npz[name])
         for arg in spec.inputs:
             data[arg.name] = np.array(npz[arg.name], dtype=NP_TYPES[arg.dtype])
-        data[f"{out_arg.name}_ref"] = np.array(npz[f"{out_arg.name}_ref"], dtype=np.float64)
+        ref_raw = npz[ref_key]
+        if out_arg.dtype == "int32" and ref_raw.dtype != np.int32:
+            raise ValueError(f"{path}: {ref_key} dtype {ref_raw.dtype} != int32 (정수 출력 과제의 참조는 int32 로 저장한다)")
+        data[ref_key] = np.array(ref_raw, dtype=REF_NP_TYPES[out_arg.dtype])
     dims = {n: data[n] for n in spec.dim_names}
     for arg in [*spec.inputs, out_arg]:
         key = arg.name if arg.kind == "in" else f"{arg.name}_ref"
@@ -272,6 +309,12 @@ def load_test(path: Path, spec: TaskSpec) -> dict[str, Any]:
         if tuple(data[key].shape) != want:
             raise ValueError(f"{path}: {key} 형태 {tuple(data[key].shape)} != 명세 {want} (dims={dims})")
     return data
+
+
+def load_dims(path: Path, spec: TaskSpec) -> dict[str, int]:
+    """테스트 npz 에서 dim 스칼라만 읽는다(import 모드의 형태별 빌드: 입력 데이터는 필요 없다)."""
+    with np.load(path) as npz:
+        return {name: int(npz[name]) for name in spec.dim_names}
 
 
 # ----------------------------------------------------------------------------- 시스템 샘플링
@@ -330,7 +373,7 @@ def package_temp_c() -> float | None:
 def loadavg_1m() -> float | None:
     try:
         return float(os.getloadavg()[0])
-    except OSError:
+    except (OSError, AttributeError):  # AttributeError: os.getloadavg 가 없는 플랫폼(Windows)
         return None
 
 
@@ -348,35 +391,126 @@ class ResultWriter:
         atomic_write_json(self.path, self.doc)
 
 
-# ----------------------------------------------------------------------------- 호출
+@contextlib.contextmanager
+def harness_only(writer: ResultWriter, what: str) -> Iterator[None]:
+    """LLM 코드가 돌지 않는 구간. 여기서 프로세스가 죽으면(중단·세그폴트·타임아웃) 원인은 하네스 쪽(도구·설정)이다.
+
+    들어가기 전에 결과 문서에 ``worker_error`` 를 써 두고 빠져나오면(예외로든) 지운다 — 문서가 그대로 남으면 run.py 가
+    harness_error 로 run 을 멈추고 행을 쓰지 않는다. 구간 안에서 난 예외는 평소처럼 올라간다."""
+    writer.doc["worker_error"] = f"워커가 {what} 중에 끝났다(LLM 코드를 실행하기 전: 도구·설정 문제)"
+    writer.flush()
+    try:
+        yield
+    finally:
+        writer.doc.pop("worker_error", None)
+        writer.flush()
 
 
-def call_kernel(handle: KernelHandle, bufs: Buffers) -> tuple[float, Any, dict[str, Any] | None]:
-    """커널을 한 번 호출한다 → ``(elapsed_ms, return_value, exception|None)``. 어떤 BaseException 도 잡는다."""
-    exc: dict[str, Any] | None = None
-    ret: Any = None
+# ----------------------------------------------------------------------------- 커널 로드·준비·호출
+
+
+def load_kernel(
+    ns: argparse.Namespace,
+    options: kernels.KernelOptions,
+    spec: TaskSpec,
+    tests: list[tuple[str, Path]],
+    writer: ResultWriter,
+) -> kernels.KernelHandle | None:
+    """백엔드를 열고 커널을 로드한다. import 모드에서 형태별 빌드가 있는 백엔드는 첫 테스트 크기로 빌드까지 해 본다
+    (정의 오류가 빌드 단계의 ``compile_error`` 로 드러나게). 커널 쪽 실패면 결과 문서에 ``load_ok=false`` 와 판정을 적고 None."""
+    doc = writer.doc
+    try:
+        with harness_only(writer, "백엔드를 준비하는"):
+            load = kernels.open_backend(ns.backend, options)
+        handle = load(ns.artifact, spec)
+        if ns.mode == "import" and handle.per_shape_build:
+            if not tests:
+                raise ValueError(f"--tests(첫 정확성 테스트)가 필요하다 (import, --backend {ns.backend})")
+            name, path = tests[0]
+            dims = load_dims(path, spec)
+            doc.update({"test": name, "dims": dims, "in_progress": {"test": name, "call_idx": None}})
+            writer.flush()
+            doc["build_ms"] = handle.prepare(dims)
+            doc["in_progress"] = None
+    except kernels.KernelError as e:
+        doc.update({"load_ok": False, "load_error": e.detail, "classification": e.classification, "error_detail": e.detail})
+        if e.exception is not None:
+            doc["exception"] = e.exception
+        return None
+    doc.update({"load_ok": True, "load_error": None})
+    return handle
+
+
+def collect_inspect(handle: kernels.KernelHandle, dims: dict[str, int] | None, writer: ResultWriter) -> None:
+    """``--inspect``: 로드된 커널의 관찰값을 결과 문서의 ``inspect`` 에 넣는다. 수집 실패는 ``inspect.inspect_error`` 로 남을 뿐
+    로드 판정(``load_ok``·``classification``)을 바꾸지 않는다.
+
+    ``dims`` (성능 형태)로 다시 빌드하는 백엔드는 여기서 LLM 코드를 한 번 더 실행한다. 그 도중에 프로세스가 끝나도(중단·시간
+    초과) 문서에 "로드는 됐고 수집이 끝나지 않았다"가 남도록 먼저 써 둔다."""
+    doc = writer.doc
+    doc["inspect"] = {"inspect_error": INSPECT_UNFINISHED}
+    doc["in_progress"] = {"test": INSPECT_STEP, "call_idx": None}
+    writer.flush()
+    doc["inspect"] = handle.inspect(dims)
+
+
+def prepare_kernel(
+    handle: kernels.KernelHandle, bufs: Buffers, test_name: str, writer: ResultWriter
+) -> tuple[float | None, dict[str, Any] | None]:
+    """테스트 하나에 대해 커널을 준비한다(인자 묶기, 형태별 빌드) → ``(build_ms, crash)``.
+
+    ``crash`` 는 준비가 커널 쪽 원인으로 실패했을 때의 기록 ``{"pattern", "exception", "elapsed_ms"}`` 다: 그 테스트의
+    ``runtime_crash`` 가 된다. 형태별 빌드는 LLM 코드를 실행하므로 그 전에 ``in_progress`` 를 써 둔다(빌드 중 프로세스가
+    죽어도 어느 테스트였는지 남는다)."""
+    if handle.per_shape_build:
+        writer.doc["in_progress"] = {"test": test_name, "call_idx": None}
+        writer.flush()
     t0 = time.perf_counter_ns()
     try:
-        ret = handle.invoke(bufs)
+        return handle.prepare(bufs.dims, bufs.views), None
+    except kernels.KernelError as e:
+        elapsed_ms = (time.perf_counter_ns() - t0) / 1e6
+        return None, {"pattern": e.detail, "exception": e.record(), "elapsed_ms": elapsed_ms}
+
+
+def call_kernel(handle: kernels.KernelHandle) -> tuple[float, Any, dict[str, Any] | None]:
+    """커널을 한 번 호출한다 → ``(elapsed_ms, return_value, exception|None)``. 어떤 BaseException 도 잡는다."""
+    t0 = time.perf_counter_ns()
+    try:
+        ret = handle.invoke()
     except BaseException as e:  # 커널의 예외·SystemExit·KeyboardInterrupt 모두 runtime_crash
         t1 = time.perf_counter_ns()
-        tb = _safe_format_exc()
-        exc = {"type": type(e).__name__, "message": _safe_str(e)[:1000], "traceback": tb[-TRACEBACK_TAIL_CHARS:]}
-        return (t1 - t0) / 1e6, None, exc
+        return (t1 - t0) / 1e6, None, kernels.exception_record(e)
     t1 = time.perf_counter_ns()
-    return (t1 - t0) / 1e6, ret, exc
+    return (t1 - t0) / 1e6, ret, None
 
 
 def outputs_close(a: np.ndarray, b: np.ndarray, tol: Tolerance) -> bool:
-    """두 출력이 허용오차 안에서 같은가(NaN 은 NaN 과 같다; 유한 마스크가 다르면 다르다)."""
+    """두 출력이 허용오차 안에서 같은가(NaN 은 NaN 과 같다; 유한 마스크가 다르면 다르다).
+    정확 비교 과제(``tol.compare == "exact"``)는 원소가 전부 같아야 한다."""
+    if tol.compare == COMPARE_EXACT:
+        return bool(np.array_equal(a, b))
     fa, fb = np.isfinite(a), np.isfinite(b)
     if not np.array_equal(fa, fb):
         return False
     return bool(np.allclose(a, b, rtol=tol.rtol, atol=tol.atol, equal_nan=True))
 
 
-def _return_type(handle: KernelHandle, ret: Any) -> str | None:
-    return type(ret).__name__ if handle.backend == "python" else None
+def _return_type(handle: kernels.KernelHandle, ret: Any) -> str | None:
+    return type(ret).__name__ if handle.has_return_value else None
+
+
+def _run_record(elapsed_ms: float, exc: dict[str, Any] | None, return_type: str | None) -> dict[str, Any]:
+    """check 모드의 호출 기록 하나(판정 전). 예외가 있으면 ``runtime_crash`` 로 채운다."""
+    run: dict[str, Any] = {
+        "classification": None, "pattern": "", "max_abs_err": None, "max_tol_ratio": None,
+        "n_unwritten": None, "nan_inf": None, "n_fail": None, "n_total": None, "elapsed_ms": elapsed_ms, "exception": exc,
+        "return_type": return_type, "inputs_mutated": None, "oob_write": None,
+    }
+    if exc is not None:
+        run["classification"] = "runtime_crash"
+        run["pattern"] = kernels.crash_detail(exc)
+    return run
 
 
 def _apply_contract_flags(status: str, pattern: str, *, mutated: bool, oob: bool) -> tuple[str, str]:
@@ -398,18 +532,24 @@ def _apply_contract_flags(status: str, pattern: str, *, mutated: bool, oob: bool
 
 
 def run_check(
-    handle: KernelHandle,
+    handle: kernels.KernelHandle,
     spec: TaskSpec,
     tests: list[tuple[str, Path]],
     tol: Tolerance,
     check_repeats: int,
     writer: ResultWriter,
+    *,
+    sanitize: bool = False,
 ) -> None:
-    """정확성 테스트마다 ``check_repeats`` 회 호출해 판정하고 실행 간 불일치를 본다. 결과는 writer.doc 에 쓴다."""
+    """정확성 테스트마다 ``check_repeats`` 회 호출해 판정하고 실행 간 불일치를 본다. 결과는 writer.doc 에 쓴다.
+
+    문서의 ``inputs_mutated``/``oob_write`` 는 호출 뒤 입력·가드를 실제로 검사한 호출이 하나라도 있어야 값이 된다.
+    그 전에는 None(= 검사 못 함, 행에서는 NA)이다: 첫 호출에서 예외·시그널·시간 초과로 끝난 커널을 "검사했고 없음"(0)으로
+    적지 않는다. ``sanitize`` 는 ``Buffers`` 의 ``--sanitize`` 배치(정확 크기, 가드 없음)다."""
     doc = writer.doc
     doc["tests"] = []
-    doc["inputs_mutated"] = False
-    doc["oob_write"] = False
+    doc["inputs_mutated"] = None
+    doc["oob_write"] = None
     doc["nondeterministic"] = False
     doc["max_abs_err"] = None
     doc["max_tol_ratio"] = None
@@ -418,27 +558,31 @@ def run_check(
     crashed = False
 
     for name, path in tests:
-        bufs = Buffers(spec, load_test(path, spec), tol.sentinel)
+        bufs = Buffers(spec, load_test(path, spec), tol.sentinel, sanitize=sanitize)
         test_doc: dict[str, Any] = {"name": name, **bufs.dims, "dims": dict(bufs.dims), "runs": [], "classification": None,
                                     "pattern": "", "nondeterministic": False}
         doc["tests"].append(test_doc)
         outputs: list[np.ndarray] = []
 
-        for call_idx in range(check_repeats):
+        build_ms, crash = prepare_kernel(handle, bufs, name, writer)
+        if build_ms is not None:
+            test_doc["build_ms"] = build_ms
+        if crash is not None:
+            run = _run_record(crash["elapsed_ms"], crash["exception"], _return_type(handle, None))
+            run["pattern"] = crash["pattern"]
+            test_doc["runs"].append(run)
+            crashed = True
+            writer.flush()
+
+        for call_idx in range(0 if crashed else check_repeats):
             bufs.restore_inputs()
             bufs.fill_sentinel()
             doc["in_progress"] = {"test": name, "call_idx": call_idx}
             writer.flush()
 
-            elapsed_ms, ret, exc = call_kernel(handle, bufs)
-            run: dict[str, Any] = {
-                "classification": None, "pattern": "", "max_abs_err": None, "max_tol_ratio": None,
-                "n_unwritten": None, "nan_inf": None, "elapsed_ms": elapsed_ms, "exception": exc,
-                "return_type": _return_type(handle, ret), "inputs_mutated": None, "oob_write": None,
-            }
+            elapsed_ms, ret, exc = call_kernel(handle)
+            run = _run_record(elapsed_ms, exc, _return_type(handle, ret))
             if exc is not None:
-                run["classification"] = "runtime_crash"
-                run["pattern"] = f"{exc['type']}: {exc['message']}".rstrip(": ")[:500]
                 test_doc["runs"].append(run)
                 crashed = True
                 writer.flush()
@@ -454,10 +598,14 @@ def run_check(
             run.update({
                 "classification": status, "pattern": pattern, "max_abs_err": metrics["max_abs_err"],
                 "max_tol_ratio": metrics["max_tol_ratio"], "n_unwritten": metrics["n_unwritten"],
-                "nan_inf": metrics["nan_inf"], "inputs_mutated": mutated, "oob_write": oob,
+                "nan_inf": metrics["nan_inf"], "n_fail": metrics["n_fail"], "n_total": metrics["n_total"],
+                "inputs_mutated": mutated, "oob_write": oob,
             })
             any_mutated = any_mutated or mutated
             any_oob = any_oob or oob
+            # 검사한 호출마다 문서에 반영한다: 다음 호출에서 프로세스가 죽어도 이미 본 값이 남는다
+            doc["inputs_mutated"] = any_mutated
+            doc["oob_write"] = any_oob
             test_doc["runs"].append(run)
             outputs.append(bufs.out.view.copy())
             writer.flush()
@@ -477,8 +625,6 @@ def run_check(
         test_doc["max_abs_err"] = max(errs) if errs else None
         test_doc["max_tol_ratio"] = max(ratios) if ratios else None
 
-        doc["inputs_mutated"] = any_mutated
-        doc["oob_write"] = any_oob
         doc["nondeterministic"] = any(t["nondeterministic"] for t in doc["tests"])
         all_errs = [t["max_abs_err"] for t in doc["tests"] if t.get("max_abs_err") is not None]
         all_ratios = [t["max_tol_ratio"] for t in doc["tests"] if t.get("max_tol_ratio") is not None]
@@ -508,7 +654,7 @@ def _stats(timed_ms: list[float]) -> dict[str, float | None]:
 
 
 def run_bench(
-    handle: KernelHandle,
+    handle: kernels.KernelHandle,
     spec: TaskSpec,
     test: tuple[str, Path],
     tol: Tolerance,
@@ -519,16 +665,18 @@ def run_bench(
     budget_s: float,
     writer: ResultWriter,
     cpus: list[int] | None = None,
+    sanitize: bool = False,
 ) -> None:
     """성능 테스트 1개: 센티널 채움 1회 → warmup → timed. 적응·조기 종료 규칙은 설계 §8.
 
     ``cpus`` 는 주파수·스로틀 샘플링 대상 CPU(= taskset 으로 고정된 집합). **커널 로드 전에** 읽은 값을 넘겨야 한다:
     OpenMP 커널(libgomp)은 ``OMP_PROC_BIND=true`` 면 로드 시점에 주 스레드를 place 0(첫 코어)에 묶어
     ``os.sched_getaffinity(0)`` 이 CPU 하나로 좁아진다(실측). None 이면 지금 읽는다.
+    ``sanitize`` 는 ``Buffers`` 의 ``--sanitize`` 배치다.
     """
     doc = writer.doc
     name, path = test
-    bufs = Buffers(spec, load_test(path, spec), tol.sentinel)
+    bufs = Buffers(spec, load_test(path, spec), tol.sentinel, sanitize=sanitize)
     cpus = pinned_cpus() if cpus is None else list(cpus)
 
     doc.update({
@@ -555,17 +703,26 @@ def run_bench(
     last_ret: Any = None
     crashed = False
     early_exit = False
+
+    build_ms, crash = prepare_kernel(handle, bufs, name, writer)
+    if build_ms is not None:
+        doc["build_ms"] = build_ms
+    if crash is not None:
+        doc["exception"] = crash["exception"]
+        doc["classification"] = "runtime_crash"
+        doc["error_detail"] = crash["pattern"]
+        crashed = True
     writer.flush()
 
-    while warm_done < n_warm or timed_done < n_timed:
+    while not crashed and (warm_done < n_warm or timed_done < n_timed):
         is_warm = warm_done < n_warm
         doc["in_progress"] = {"test": name, "call_idx": call_idx}
         writer.flush()
-        elapsed_ms, ret, exc = call_kernel(handle, bufs)
+        elapsed_ms, ret, exc = call_kernel(handle)
         if exc is not None:
             doc["exception"] = exc
             doc["classification"] = "runtime_crash"
-            doc["error_detail"] = f"{exc['type']}: {exc['message']}".rstrip(": ")[:500]
+            doc["error_detail"] = kernels.crash_detail(exc)
             crashed = True
             break
         last_ret = ret
@@ -656,12 +813,41 @@ def parse_tests(spec: str | None) -> list[tuple[str, Path]]:
     return out
 
 
+def _json_object(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"JSON 이 아니다: {e}") from None
+    if not isinstance(value, dict):
+        raise argparse.ArgumentTypeError("JSON 객체여야 한다")
+    return value
+
+
+def parse_halide_params(text: str) -> dict[str, Any]:
+    """``--halide-params``: 오토스케줄러 추가 매개변수(JSON 객체; 값은 문자열·정수·실수 — Halide 에는 문자열로 넘어간다)."""
+    value = _json_object(text)
+    bad = [k for k, v in value.items() if isinstance(v, bool) or not isinstance(v, (str, int, float))]
+    if bad:
+        raise argparse.ArgumentTypeError(f"값은 문자열·정수·실수여야 한다: {bad}")
+    return value
+
+
+def parse_dims(text: str) -> dict[str, int]:
+    """``--inspect-dims``: dim 이름 → 정수(JSON 객체)."""
+    value = _json_object(text)
+    bad = [k for k, v in value.items() if isinstance(v, bool) or not isinstance(v, int)]
+    if bad:
+        raise argparse.ArgumentTypeError(f"dim 값은 정수여야 한다: {bad}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m harness.worker", description="LLM 커널 실행 워커 (설계 §8)")
-    parser.add_argument("--backend", choices=("c", "python"), required=True)
+    parser = argparse.ArgumentParser(prog="python -m harness.worker", description="LLM 커널 실행 워커 (설계 §8, v3 §5)")
+    parser.add_argument("--backend", choices=kernels.BACKENDS, required=True, help="rust 산출물은 C ABI 라 c 로 실행한다")
     parser.add_argument("--artifact", type=Path, required=True, help="kernel.so 또는 kernel.py")
     parser.add_argument("--mode", choices=("import", "check", "bench"), required=True)
-    parser.add_argument("--tests", default=None, help="npz 파일 경로(쉼표 구분); check 는 여러 개, bench 는 1개")
+    parser.add_argument("--tests", default=None,
+                        help="npz 파일 경로(쉼표 구분); check 는 여러 개, bench 는 1개, halide 의 import 는 첫 정확성 테스트")
     parser.add_argument("--tolerance", type=Path, default=None, help="tolerance.yaml (check/bench 필수)")
     parser.add_argument("--signatures", type=Path, default=DEFAULT_SIGNATURES, help="과제 signatures.yaml (기본 gemm)")
     parser.add_argument("--out", type=Path, required=True, help="결과 JSON 경로")
@@ -670,18 +856,47 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--min-repeats", type=int, default=3)
     parser.add_argument("--budget-s", type=float, default=300.0)
-    parser.add_argument("--args-mode", choices=("positional", "keyword"), default="positional")
-    parser.add_argument("--max-mem-gb", type=float, default=8.0)
+    parser.add_argument("--args-mode", choices=kernels.ARGS_MODES, default="positional")
+    parser.add_argument("--halide-mode", choices=kernels.HALIDE_MODES, default=None,
+                        help="halide: auto(하네스가 오토스케줄러를 적용) | manual(커널이 스케줄을 쓴다)")
+    parser.add_argument("--halide-autoscheduler", default=kernels.DEFAULT_AUTOSCHEDULER, help="halide auto 의 오토스케줄러 이름")
+    parser.add_argument("--halide-params", type=parse_halide_params, default={}, metavar="JSON",
+                        help="halide auto: 오토스케줄러 추가 매개변수(JSON 객체)")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="측정 스레드 수(오케스트레이터가 환경변수로 건 값); halide auto 에서는 오토스케줄러의 parallelism")
+    parser.add_argument("--inspect", action="store_true", help="import 모드: 컴파일 결과 관찰값을 결과 문서의 inspect 에 넣는다")
+    parser.add_argument("--inspect-dims", type=parse_dims, default=None, metavar="JSON",
+                        help="--inspect: 성능 형태의 dim 값(JSON 객체); halide 는 이 크기로 만든 파이프라인을 기술한다")
+    parser.add_argument("--max-mem-gb", type=float, default=8.0, help="RLIMIT_AS (GiB); 0 이하면 제한을 걸지 않는다")
+    parser.add_argument("--sanitize", action="store_true",
+                        help="ASan 실행용 버퍼: 배열마다 정확한 크기의 C 할당(64바이트 정렬, 가드 없음)")
     return parser
 
 
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """명령줄을 읽고 백엔드 옵션의 조합을 확인한다(틀리면 argparse 의 사용법 오류: rc=2, 결과 문서 없음)."""
+    parser = build_parser()
+    ns = parser.parse_args(argv)
+    if ns.threads is not None and ns.threads < 1:
+        parser.error("--threads 는 1 이상이어야 한다")
+    if ns.backend == "halide":
+        if ns.halide_mode is None:
+            parser.error("--backend halide 에는 --halide-mode 가 필요하다")
+        if ns.halide_mode == "auto" and ns.threads is None:
+            parser.error("--halide-mode auto 에는 --threads 가 필요하다(오토스케줄러의 parallelism)")
+    return ns
+
+
 def main(argv: list[str] | None = None) -> int:
-    ns = build_parser().parse_args(argv)
+    ns = parse_args(argv)
+    options = kernels.KernelOptions(args_mode=ns.args_mode, threads=ns.threads, halide_mode=ns.halide_mode,
+                                    halide_autoscheduler=ns.halide_autoscheduler, halide_params=ns.halide_params)
     doc: dict[str, Any] = {
-        "mode": ns.mode, "backend": ns.backend, "artifact": str(ns.artifact),
+        "mode": ns.mode, "backend": ns.backend, "backend_detail": kernels.backend_detail(ns.backend, options),
+        "artifact": str(ns.artifact),
         "complete": False, "in_progress": None, "load_ok": None, "load_error": None,
         "classification": None, "error_detail": "", "blas": None, "limits": None,
-        "loadavg_start": None, "loadavg_end": None,
+        "loadavg_start": None, "loadavg_end": None, "sanitize": ns.sanitize,
     }
     writer = ResultWriter(ns.out, doc)
     sys.dont_write_bytecode = True  # 커널(kernel.py/baseline.py) 옆에 __pycache__ 를 남기지 않는다
@@ -697,37 +912,35 @@ def main(argv: list[str] | None = None) -> int:
         doc["pinned_cpus"] = affinity
         writer.flush()
 
+        tests = parse_tests(ns.tests)
         if ns.mode in ("check", "bench"):
             if ns.tolerance is None:
                 raise ValueError("--tolerance 가 필요하다 (check/bench)")
-            tests = parse_tests(ns.tests)
             if not tests:
                 raise ValueError("--tests 가 필요하다 (check/bench)")
             if ns.mode == "bench" and len(tests) != 1:
                 raise ValueError(f"bench 모드는 테스트 1개만 받는다 (현재 {len(tests)}개)")
             tol = load_tolerance(ns.tolerance)
         else:
-            tests = []
             tol = None
 
         spec = load_taskspec(ns.signatures)
         doc["task"] = spec.task
-        handle, cls, detail = load_kernel(ns.backend, ns.artifact, ns.args_mode, spec)
-        doc["load_ok"] = handle is not None
-        doc["load_error"] = detail or None
+        handle = load_kernel(ns, options, spec, tests, writer)
         if handle is None:
-            doc["classification"] = cls
-            doc["error_detail"] = detail
+            pass  # load_kernel 이 판정을 적었다
         elif ns.mode == "import":
             doc["classification"] = "pass"
+            if ns.inspect:
+                collect_inspect(handle, ns.inspect_dims, writer)
         elif ns.mode == "check":
             assert tol is not None
-            run_check(handle, spec, tests, tol, max(1, ns.check_repeats), writer)
+            run_check(handle, spec, tests, tol, max(1, ns.check_repeats), writer, sanitize=ns.sanitize)
         else:
             assert tol is not None
             run_bench(handle, spec, tests[0], tol, warmup=max(0, ns.warmup), repeats=max(1, ns.repeats),
                       min_repeats=max(1, min(ns.min_repeats, ns.repeats)), budget_s=ns.budget_s, writer=writer,
-                      cpus=affinity)
+                      cpus=affinity, sanitize=ns.sanitize)
 
         doc["loadavg_end"] = loadavg_1m()
         doc["in_progress"] = None
@@ -736,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except Exception:  # 하네스 버그: 기록하고 rc=3
         tb = traceback.format_exc()
-        doc["worker_error"] = tb[-TRACEBACK_TAIL_CHARS * 2 :]
+        doc["worker_error"] = tb[-WORKER_ERROR_TAIL_CHARS:]
         doc["complete"] = False
         try:
             writer.flush()

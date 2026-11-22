@@ -16,6 +16,11 @@ v2.1(2026-11-04): arg_order 패턴을 센티널 규칙보다 먼저 본다(그�
 out_of_bounds_write 에 가려 도달 불가). 규칙 4 안에서는 ``accumulated_into_c`` 를 ``partial_write`` 보다 먼저 본다:
 float32 에서 ``sentinel + ref`` 는 |ref| < 2⁻¹³ 이면 정확히 센티널로 되돌아가 '미기록'으로 세어지기 때문이다.
 
+v3(2026-11-20; docs/harness_design_v3.md §2.2–2.3): 정확 비교(``tolerance.yaml`` 의 ``compare: exact`` — 정수 출력 과제).
+``compare_exact(out, ref)`` 가 지표를 내고 ``classify_generic`` 은 규칙 1·5 를 건너뛴다: 전부 같음 → ``pass``, 패턴 함수 →
+``arg_order``, 센티널·계약(전부 센티널 → ``out − sentinel == ref`` 누적 → 일부 센티널 → OOB) → ``wrong_output``, 그 밖
+``wrong_output``/``mismatch``. 정확 비교 과제에는 ``numeric_instability`` 가 없다. 허용오차 경로(기존 과제)는 바뀌지 않았다.
+
 이 모듈은 LLM 코드를 실행하지 않는다(순수 numpy 비교). 워커와 run.py 가 함께 쓴다.
 """
 
@@ -41,10 +46,15 @@ SAMPLE_STATUSES: tuple[str, ...] = ("pass", "runtime_crash", "race_condition", "
 # swapped_MN_dims 패턴: 전체 가드 버퍼에서 맞는 위치 비율 하한
 SWAPPED_MN_MATCH_FRACTION = 0.99
 
+# tolerance.yaml 의 ``compare``: 허용오차 비교(기본) | 정확 비교(정수 출력 과제)
+COMPARE_TOLERANCE = "tolerance"
+COMPARE_EXACT = "exact"
+COMPARE_MODES: tuple[str, ...] = (COMPARE_TOLERANCE, COMPARE_EXACT)
+
 
 @dataclass(frozen=True)
 class Tolerance:
-    """``tasks/<task>/tolerance.yaml`` 의 값."""
+    """``tasks/<task>/tolerance.yaml`` 의 값. ``compare == "exact"`` 면 rtol·atol·numeric_pattern_tol_ratio 는 0 이다."""
 
     rtol: float
     atol: float
@@ -53,22 +63,46 @@ class Tolerance:
     task: str = ""
     dtype: str = "float32"
     reference_dtype: str = "float64"
+    compare: str = COMPARE_TOLERANCE
 
 
 def load_tolerance(path: Path) -> Tolerance:
-    """tolerance.yaml 을 읽는다. 필수 키가 없으면 ``KeyError``."""
+    """tolerance.yaml 을 읽는다. 필수 키가 없으면 ``KeyError``.
+
+    ``compare: exact`` 면 ``rtol``·``atol``·``numeric_pattern_tol_ratio`` 는 없어도 되고(기본 0) 0 이 아닌 값은 거부한다.
+    ``sentinel`` 은 어느 방식에서나 필수다. ``reference_dtype`` 의 기본값은 int32 출력이면 ``int32``, 아니면 ``float64``.
+    """
     with Path(path).open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: 최상위가 매핑이 아니다")
+    mode = str(raw.get("compare", COMPARE_TOLERANCE))
+    if mode not in COMPARE_MODES:
+        raise ValueError(f"{path}: compare 는 {COMPARE_MODES} 중 하나여야 한다: {mode!r}")
+    dtype = str(raw.get("dtype", "float32"))
+    if mode == COMPARE_EXACT:
+        rtol = float(raw.get("rtol", 0.0))
+        atol = float(raw.get("atol", 0.0))
+        ratio = float(raw.get("numeric_pattern_tol_ratio", 0.0))
+        if rtol != 0.0 or atol != 0.0 or ratio != 0.0:
+            raise ValueError(f"{path}: compare: exact 에서는 rtol·atol·numeric_pattern_tol_ratio 가 0 이어야 한다")
+        sentinel = float(raw["sentinel"])
+        if dtype.startswith("int") and not sentinel.is_integer():
+            raise ValueError(f"{path}: 정수 출력의 sentinel 은 정수여야 한다: {raw['sentinel']!r}")
+    else:
+        rtol = float(raw["rtol"])
+        atol = float(raw["atol"])
+        ratio = float(raw["numeric_pattern_tol_ratio"])
+        sentinel = float(raw["sentinel"])
     return Tolerance(
-        rtol=float(raw["rtol"]),
-        atol=float(raw["atol"]),
-        numeric_pattern_tol_ratio=float(raw["numeric_pattern_tol_ratio"]),
-        sentinel=float(raw["sentinel"]),
+        rtol=rtol,
+        atol=atol,
+        numeric_pattern_tol_ratio=ratio,
+        sentinel=sentinel,
         task=str(raw.get("task", "")),
-        dtype=str(raw.get("dtype", "float32")),
-        reference_dtype=str(raw.get("reference_dtype", "float64")),
+        dtype=dtype,
+        reference_dtype=str(raw.get("reference_dtype", "int32" if dtype == "int32" else "float64")),
+        compare=mode,
     )
 
 
@@ -110,8 +144,46 @@ def compare(out: Any, ref64: Any, rtol: float, atol: float) -> dict[str, Any]:
     }
 
 
+def _exact_operands(out: Any, ref: Any) -> tuple[np.ndarray, np.ndarray]:
+    """정확 비교용 1-D 피연산자. 둘 다 정수면 int64(차가 int32 를 넘지 않게), 아니면 float64 로 올린다."""
+    o = np.asarray(out).reshape(-1)
+    r = np.asarray(ref).reshape(-1)
+    if o.shape != r.shape:
+        raise ValueError(f"compare_exact: 크기가 다르다 out={o.shape} ref={r.shape}")
+    wide = np.int64 if (o.dtype.kind in "iub" and r.dtype.kind in "iub") else np.float64
+    return o.astype(wide, copy=False), r.astype(wide, copy=False)
+
+
+def compare_exact(out: Any, ref: Any) -> dict[str, Any]:
+    """정확 비교 지표(설계 v3 §2.3). ``compare`` 와 같은 키를 돌려준다.
+
+    ``ok``(모든 원소가 같음), ``nan_inf``(항상 False — 정확 비교 과제에는 수치 불안정 분류가 없다),
+    ``max_abs_err``(차의 절댓값의 최댓값, float; 원소가 없으면 None), ``max_tol_ratio``(항상 None),
+    ``n_fail``(다른 원소 수), ``max_abs_ref``.
+    """
+    o, r = _exact_operands(out, ref)
+    with np.errstate(invalid="ignore", over="ignore"):
+        diff = np.abs(o - r)
+        n_fail = int(np.count_nonzero(o != r))
+    if o.dtype.kind == "f":
+        finite = np.isfinite(diff)
+        max_abs_err: float | None = float(diff[finite].max()) if finite.any() else None
+    else:
+        max_abs_err = float(diff.max()) if diff.size else None
+    return {
+        "ok": n_fail == 0,
+        "nan_inf": False,
+        "max_abs_err": max_abs_err,
+        "max_tol_ratio": None,
+        "n_fail": n_fail,
+        "max_abs_ref": float(np.abs(r).max()) if r.size else 0.0,
+    }
+
+
 def _close(out2d: np.ndarray, ref2d: np.ndarray, tol: Tolerance) -> bool:
-    """유한 원소 전부가 허용오차 내인가(arg_order 패턴 매치용)."""
+    """유한 원소 전부가 허용오차 내인가(arg_order 패턴 매치용). 정확 비교 과제는 전부 같은가."""
+    if tol.compare == COMPARE_EXACT:
+        return bool(compare_exact(out2d, ref2d)["ok"])
     return bool(compare(out2d, ref2d, tol.rtol, tol.atol)["ok"])
 
 
@@ -172,7 +244,11 @@ def classify_generic(
     return_type: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """과제에 무관한 출력 판정(설계 §10 v2.1 규칙 1–6). ``pattern_fn(out_flat, ref)`` 는 과제별 arg_order 패턴 이름
-    (없으면 ``""``)을 돌려주는 함수로, 규칙 3 에서만 불린다. ``ref64`` 의 형태가 출력의 논리 형태다."""
+    (없으면 ``""``)을 돌려주는 함수로, 규칙 3 에서만 불린다. ``ref64`` 의 형태가 출력의 논리 형태다.
+
+    ``tol.compare == "exact"`` (정수 출력 과제)면 정확 비교 규칙(``_classify_generic_exact``)으로 판정한다."""
+    if tol.compare == COMPARE_EXACT:
+        return _classify_generic_exact(out, ref64, tol, pattern_fn=pattern_fn, oob_write=oob_write, return_type=return_type)
     o32 = np.asarray(out).reshape(-1)
     r = np.asarray(ref64, dtype=np.float64)
     n_total = int(r.size)
@@ -227,6 +303,71 @@ def classify_generic(
         return "numeric_instability", "imprecise", metrics
 
     # 6. 그 밖
+    return "wrong_output", "mismatch", metrics
+
+
+def _classify_generic_exact(
+    out: Any,
+    ref: Any,
+    tol: Tolerance,
+    *,
+    pattern_fn: Any | None = None,
+    oob_write: bool = False,
+    return_type: str | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    """정확 비교 과제의 출력 판정(설계 v3 §2.3). 규칙 번호는 허용오차 경로와 같다: 1(NaN/Inf)·5(imprecise)는 없고,
+    2 전부 같음 → ``pass``, 3 패턴 함수 → ``arg_order``, 4 센티널·계약 → ``wrong_output``, 6 그 밖 → ``wrong_output``/``mismatch``.
+
+    참조는 넘어온 dtype 그대로 쓴다(int32 출력의 참조는 int32). metrics 의 키는 허용오차 경로와 같고
+    ``max_tol_ratio`` 는 None, ``nan_inf`` 는 False 다.
+    """
+    o = np.asarray(out).reshape(-1)
+    r = np.asarray(ref)
+    n_total = int(r.size)
+    if o.size != n_total:
+        raise ValueError(f"classify: out 크기 {o.size} != 참조 크기 {n_total}")
+
+    # 워커가 출력 버퍼를 채울 때와 같은 변환(dtype.type(sentinel))으로 센티널을 만든다.
+    n_unwritten = int(np.count_nonzero(o == o.dtype.type(tol.sentinel)))
+
+    cmp = compare_exact(o, r)
+    metrics: dict[str, Any] = {
+        "max_abs_err": cmp["max_abs_err"],
+        "max_tol_ratio": None,
+        "n_fail": cmp["n_fail"],
+        "nan_inf": False,
+        "n_unwritten": n_unwritten,
+        "n_total": n_total,
+        "max_abs_ref": cmp["max_abs_ref"],
+        "oob_write": bool(oob_write),
+    }
+
+    # 2. 전부 같음
+    if cmp["ok"]:
+        return "pass", "", metrics
+
+    # 3. arg_order 패턴(과제별; 2-D 출력의 전치 등)
+    pattern = pattern_fn(o, r) if pattern_fn is not None else ""
+    if pattern:
+        return "arg_order", pattern, metrics
+
+    # 4. 센티널·계약 검사: 전부 미기록 → 누적 → 부분 기록 → OOB (허용오차 경로와 같은 순서)
+    if n_total > 0 and n_unwritten == n_total:
+        pattern = "returned_array_not_written" if return_type == "ndarray" else "output_not_written"
+        return "wrong_output", pattern, metrics
+    # 누적(out += …): 초기 내용이 센티널이므로 out − sentinel == ref. 참조가 0 인 원소는 센티널 그대로 남아
+    # n_unwritten 에 세어지므로(예: 0 으로 지우지 않은 히스토그램의 빈 칸) 부분 기록보다 먼저 본다.
+    o_wide, r_wide = _exact_operands(o, r)
+    with np.errstate(invalid="ignore", over="ignore"):
+        accumulated = bool(np.array_equal(o_wide - o_wide.dtype.type(tol.sentinel), r_wide))
+    if accumulated:
+        return "wrong_output", "accumulated_into_c", metrics
+    if n_unwritten > 0:
+        return "wrong_output", f"partial_write:{n_unwritten}/{n_total}", metrics
+    if oob_write:
+        return "wrong_output", "out_of_bounds_write", metrics
+
+    # 6. 그 밖 (정확 비교 과제에는 numeric_instability 가 없다)
     return "wrong_output", "mismatch", metrics
 
 

@@ -1,13 +1,29 @@
 """classify 테스트: 규칙 순서(§10 v2.1: NaN → pass → arg_order → 센티널·계약 → imprecise → mismatch),
-더미 기대표(numpy/2 imprecise, c_seq/2 transposed_output), 센티널 규칙, 샘플 합산 우선순위."""
+더미 기대표(numpy/2 imprecise, c_seq/2 transposed_output), 센티널 규칙, 샘플 합산 우선순위.
+
+v3(§2.2–2.3): 정확 비교(``compare: exact``; 정수 출력) — ``compare_exact``, ``classify_generic``/``classify_task`` 의 정확 비교
+규칙(pass / arg_order / output_not_written / accumulated_into_c / partial_write / out_of_bounds_write / mismatch), tolerance.yaml 기본값."""
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
-from harness.classify import Tolerance, aggregate_sample, classify_output, compare, load_tolerance, match_arg_order
+from harness.classify import (
+    COMPARE_MODES,
+    Tolerance,
+    aggregate_sample,
+    classify_generic,
+    classify_output,
+    classify_task,
+    compare,
+    compare_exact,
+    load_tolerance,
+    match_arg_order,
+)
 from harness.paths import ROOT
 
 TOL = Tolerance(rtol=1e-3, atol=1e-3, numeric_pattern_tol_ratio=20.0, sentinel=-2048.0)
@@ -347,6 +363,204 @@ class ToleranceFileTest(unittest.TestCase):
         self.assertEqual(tol.sentinel, -2048.0)
         self.assertEqual(tol.dtype, "float32")
         self.assertEqual(tol.reference_dtype, "float64")
+
+    def test_existing_tasks_default_to_tolerance_compare(self) -> None:
+        for task in ("gemm", "jacobi2d", "spmv_csr", "dot"):
+            tol = load_tolerance(ROOT / "tasks" / task / "tolerance.yaml")
+            self.assertEqual(tol.compare, "tolerance", task)
+            self.assertGreater(tol.rtol, 0.0)
+        self.assertEqual(Tolerance(rtol=1e-3, atol=1e-3, numeric_pattern_tol_ratio=20.0, sentinel=-2048.0).compare, "tolerance")
+        self.assertEqual(COMPARE_MODES, ("tolerance", "exact"))
+
+    def _load(self, text: str) -> Tolerance:
+        with tempfile.TemporaryDirectory(prefix="tol_test_") as tmp:
+            path = Path(tmp) / "tolerance.yaml"
+            path.write_text(text, encoding="utf-8", newline="\n")
+            return load_tolerance(path)
+
+    def test_exact_defaults_do_not_need_rtol_atol(self) -> None:
+        # 설계 v3 §2.2 의 예 그대로
+        tol = self._load("task: histogram\ndtype: int32\ncompare: exact          # tolerance(기본) | exact\nsentinel: -2048\n")
+        self.assertEqual(tol.compare, "exact")
+        self.assertEqual((tol.rtol, tol.atol, tol.numeric_pattern_tol_ratio), (0.0, 0.0, 0.0))
+        self.assertEqual(tol.sentinel, -2048.0)
+        self.assertEqual((tol.task, tol.dtype, tol.reference_dtype), ("histogram", "int32", "int32"))
+        # 0 을 명시해도 된다
+        tol = self._load("dtype: int32\ncompare: exact\nrtol: 0\natol: 0.0\nnumeric_pattern_tol_ratio: 0\nsentinel: -7\n")
+        self.assertEqual((tol.compare, tol.sentinel), ("exact", -7.0))
+
+    def test_exact_rejects_inconsistent_files(self) -> None:
+        with self.assertRaises(KeyError):  # sentinel 은 정확 비교에서도 필수
+            self._load("dtype: int32\ncompare: exact\n")
+        with self.assertRaises(ValueError):  # 정확 비교인데 허용오차가 0 이 아님
+            self._load("dtype: int32\ncompare: exact\nrtol: 1.0e-3\nsentinel: -2048\n")
+        with self.assertRaises(ValueError):  # 정수 출력의 센티널은 정수
+            self._load("dtype: int32\ncompare: exact\nsentinel: -2048.5\n")
+        with self.assertRaises(ValueError):  # 모르는 비교 방식
+            self._load("dtype: int32\ncompare: fuzzy\nsentinel: -2048\n")
+
+    def test_tolerance_mode_still_requires_all_keys(self) -> None:
+        for missing in ("rtol", "atol", "numeric_pattern_tol_ratio", "sentinel"):
+            keys = {"rtol": "1.0e-3", "atol": "1.0e-3", "numeric_pattern_tol_ratio": "20", "sentinel": "-2048.0"}
+            del keys[missing]
+            with self.assertRaises(KeyError, msg=missing):
+                self._load("".join(f"{k}: {v}\n" for k, v in keys.items()))
+
+
+# ----------------------------------------------------------------------------- 정확 비교 (v3 §2.3)
+
+EXACT = Tolerance(rtol=0.0, atol=0.0, numeric_pattern_tol_ratio=0.0, sentinel=-2048.0, task="histogram", dtype="int32",
+                  reference_dtype="int32", compare="exact")
+ISENT = np.int32(-2048)
+HIST_REF = np.array([3, 0, 5, 1, 0, 7, 2, 0], dtype=np.int32)  # 개수가 0 인 칸이 있는 히스토그램
+
+
+class CompareExactTest(unittest.TestCase):
+    def test_keys_match_compare(self) -> None:
+        self.assertEqual(set(compare_exact(HIST_REF, HIST_REF)), set(compare(np.zeros(3), np.zeros(3), 1e-3, 1e-3)))
+
+    def test_equal(self) -> None:
+        c = compare_exact(HIST_REF.copy(), HIST_REF)
+        self.assertEqual(c, {"ok": True, "nan_inf": False, "max_abs_err": 0.0, "max_tol_ratio": None, "n_fail": 0, "max_abs_ref": 7.0})
+        self.assertIsInstance(c["max_abs_err"], float)
+
+    def test_differences_are_counted_exactly(self) -> None:
+        out = HIST_REF.copy()
+        out[0] += 1
+        out[5] -= 4
+        c = compare_exact(out, HIST_REF)
+        self.assertFalse(c["ok"])
+        self.assertEqual((c["n_fail"], c["max_abs_err"], c["max_tol_ratio"], c["nan_inf"]), (2, 4.0, None, False))
+
+    def test_int32_extremes_do_not_overflow(self) -> None:
+        lo, hi = np.iinfo(np.int32).min, np.iinfo(np.int32).max
+        c = compare_exact(np.array([lo, hi], dtype=np.int32), np.array([hi, lo], dtype=np.int32))
+        self.assertEqual((c["n_fail"], c["max_abs_err"], c["max_abs_ref"]), (2, float(hi) - float(lo), float(-lo)))
+
+    def test_shapes_and_empty(self) -> None:
+        self.assertTrue(compare_exact(HIST_REF.reshape(2, 4), HIST_REF)["ok"], "형태가 달라도 원소 순서가 같으면 같다")
+        with self.assertRaises(ValueError):
+            compare_exact(np.zeros(3, np.int32), np.zeros(4, np.int32))
+        c = compare_exact(np.zeros(0, np.int32), np.zeros(0, np.int32))
+        self.assertEqual((c["ok"], c["max_abs_err"], c["n_fail"], c["max_abs_ref"]), (True, None, 0, 0.0))
+
+    def test_one_ulp_float_difference_is_a_failure(self) -> None:
+        ref = np.array([1.0, 2.0], dtype=np.float32)
+        out = ref.copy()
+        out[1] = np.nextafter(np.float32(2.0), np.float32(3.0))
+        c = compare_exact(out, ref)
+        self.assertEqual((c["ok"], c["n_fail"]), (False, 1))
+        self.assertTrue(compare(out, ref, 1e-3, 1e-3)["ok"], "허용오차 비교라면 통과하는 차이다")
+
+
+class ClassifyExactTest(unittest.TestCase):
+    """정확 비교 과제의 출력 판정: 규칙 1·5 없음, 2 → 3 → 4(전부 센티널 → 누적 → 부분 기록 → OOB) → 6."""
+
+    def classify(self, out: np.ndarray, ref: np.ndarray = HIST_REF, **kw: object) -> tuple[str, str, dict]:
+        return classify_task("histogram", out, ref, {}, {}, EXACT, **kw)  # type: ignore[arg-type]
+
+    def test_pass(self) -> None:
+        status, pattern, metrics = self.classify(HIST_REF.copy())
+        self.assertEqual((status, pattern), ("pass", ""))
+        self.assertEqual(metrics, {"max_abs_err": 0.0, "max_tol_ratio": None, "n_fail": 0, "nan_inf": False, "n_unwritten": 0,
+                                   "n_total": 8, "max_abs_ref": 7.0, "oob_write": False})
+
+    def test_mismatch_even_by_one(self) -> None:
+        out = HIST_REF.copy()
+        out[2] += 1
+        status, pattern, metrics = self.classify(out)
+        self.assertEqual((status, pattern), ("wrong_output", "mismatch"))
+        self.assertEqual((metrics["n_fail"], metrics["max_abs_err"], metrics["n_unwritten"]), (1, 1.0, 0))
+        # 허용오차 경로라면 imprecise 였을 작은 차이도 정확 비교에서는 numeric_instability 가 아니다
+        self.assertNotEqual(status, "numeric_instability")
+
+    def test_output_not_written(self) -> None:
+        out = np.full(HIST_REF.size, ISENT, dtype=np.int32)
+        status, pattern, metrics = self.classify(out)
+        self.assertEqual((status, pattern), ("wrong_output", "output_not_written"))
+        self.assertEqual(metrics["n_unwritten"], 8)
+        self.assertEqual(self.classify(out, return_type="NoneType")[1], "output_not_written")
+        self.assertEqual(self.classify(out, return_type="ndarray")[:2], ("wrong_output", "returned_array_not_written"))
+
+    def test_accumulated_into_c_for_histogram_that_was_not_zeroed(self) -> None:
+        # 출력 버퍼를 0 으로 지우지 않고 hist[k] += 1: 초기 내용이 센티널이므로 out == sentinel + ref
+        out = np.full(HIST_REF.size, ISENT, dtype=np.int32)
+        out += HIST_REF
+        self.assertEqual(int(np.count_nonzero(out == ISENT)), 3, "전제: 개수가 0 인 칸 3개는 센티널 그대로다")
+        status, pattern, metrics = self.classify(out)
+        self.assertEqual((status, pattern), ("wrong_output", "accumulated_into_c"))
+        self.assertEqual(metrics["n_unwritten"], 3, "n_unwritten 지표는 그대로 세지만 부분 기록보다 누적이 먼저다")
+        self.assertEqual(metrics["max_abs_err"], 2048.0)
+        # 누적 + OOB 도 누적으로 보고한다(규칙 4 의 순서)
+        self.assertEqual(self.classify(out, oob_write=True)[:2], ("wrong_output", "accumulated_into_c"))
+
+    def test_partial_write(self) -> None:
+        out = HIST_REF.copy()
+        out[1] = ISENT
+        out[6] = ISENT
+        status, pattern, metrics = self.classify(out)
+        self.assertEqual((status, pattern), ("wrong_output", "partial_write:2/8"))
+        self.assertEqual(metrics["n_unwritten"], 2)
+        # 개수가 0 인 칸만 쓰지 않은 커널(0 이 아닌 칸은 맞음)은 누적이 아니라 부분 기록이다
+        skipped = HIST_REF.copy()
+        skipped[HIST_REF == 0] = ISENT
+        self.assertEqual(self.classify(skipped)[:2], ("wrong_output", "partial_write:3/8"))
+        # 부분 기록 + OOB 는 부분 기록이 먼저
+        self.assertEqual(self.classify(out, oob_write=True)[1], "partial_write:2/8")
+
+    def test_oob_write(self) -> None:
+        # 출력이 맞으면 규칙 2 가 먼저(pass) — 플래그는 metrics 에 남고 워커가 호출 수준에서 덮는다
+        status, pattern, metrics = self.classify(HIST_REF.copy(), oob_write=True)
+        self.assertEqual((status, pattern), ("pass", ""))
+        self.assertTrue(metrics["oob_write"])
+        # 출력이 틀리고 센티널이 없으면 out_of_bounds_write 가 mismatch 보다 먼저
+        out = HIST_REF.copy()
+        out[0] += 1
+        self.assertEqual(self.classify(out, oob_write=True)[:2], ("wrong_output", "out_of_bounds_write"))
+        self.assertEqual(self.classify(out)[:2], ("wrong_output", "mismatch"))
+
+    def test_transposed_2d_int_output_is_arg_order(self) -> None:
+        ref = np.arange(12, dtype=np.int32).reshape(3, 4) + 1
+        self.assertEqual(self.classify(ref.copy(), ref)[0], "pass")
+        transposed = np.ascontiguousarray(ref.T).reshape(-1)
+        self.assertEqual(self.classify(transposed, ref)[:2], ("arg_order", "transposed_output"))
+        # 전치된 채 한 원소가 틀리면 패턴이 아니다
+        transposed[0] += 1
+        self.assertEqual(self.classify(transposed, ref)[:2], ("wrong_output", "mismatch"))
+
+    def test_pattern_fn_is_consulted_between_pass_and_sentinel_rules(self) -> None:
+        calls: list[int] = []
+
+        def pattern_fn(o: np.ndarray, r: np.ndarray) -> str:
+            calls.append(o.size)
+            return "custom_pattern"
+
+        self.assertEqual(classify_generic(HIST_REF.copy(), HIST_REF, EXACT, pattern_fn=pattern_fn)[:2], ("pass", ""))
+        self.assertEqual(calls, [], "통과한 출력에는 패턴 함수를 부르지 않는다")
+        out = np.full(HIST_REF.size, ISENT, dtype=np.int32)
+        self.assertEqual(classify_generic(out, HIST_REF, EXACT, pattern_fn=pattern_fn)[:2], ("arg_order", "custom_pattern"))
+        self.assertEqual(calls, [8])
+
+    def test_sort_like_full_range_values(self) -> None:
+        # 전체 int32 범위의 값(정렬 과제): 차가 int32 를 넘어도 지표가 깨지지 않는다
+        lo, hi = np.iinfo(np.int32).min, np.iinfo(np.int32).max
+        ref = np.array([lo, -5, 0, 7, hi], dtype=np.int32)
+        self.assertEqual(self.classify(ref.copy(), ref)[0], "pass")
+        status, pattern, metrics = self.classify(ref[::-1].copy(), ref)
+        self.assertEqual((status, pattern), ("wrong_output", "mismatch"))
+        self.assertEqual(metrics["max_abs_err"], float(hi) - float(lo))
+
+    def test_size_mismatch_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.classify(HIST_REF[:-1].copy())
+
+    def test_tolerance_path_is_not_affected_by_exact_branch(self) -> None:
+        # 같은 float 출력이 허용오차 Tolerance 에서는 예전 규칙(imprecise), 정확 비교 Tolerance 에서는 mismatch
+        ref = np.array([10.0, 20.0, 30.0], dtype=np.float64)
+        out = (ref * 1.005).astype(np.float32)
+        self.assertEqual(classify_generic(out, ref, TOL)[:2], ("numeric_instability", "imprecise"))
+        exact_f = Tolerance(rtol=0.0, atol=0.0, numeric_pattern_tol_ratio=0.0, sentinel=-2048.0, compare="exact")
+        self.assertEqual(classify_generic(out, ref, exact_f)[:2], ("wrong_output", "mismatch"))
 
 
 if __name__ == "__main__":

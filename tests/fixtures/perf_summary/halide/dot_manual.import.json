@@ -1,0 +1,15 @@
+{
+  "mode": "import",
+  "backend": "halide",
+  "dims": {
+    "n": 33554432
+  },
+  "inspect": {
+    "loop_nest": "produce acc_intm:\n  for u in [0, 4095]:\n    acc_intm(...) = ...\n  parallel u in [0, 4095]:\n    for ri in [0, 8191]:\n      acc_intm(...) = ...\nconsume acc_intm:\n  produce out:\n    for i:\n      produce acc:\n        acc(...) = ...\n        for ro in [0, 4095]:\n          acc(...) = ...\n      consume acc:\n        out(...) = ...\n",
+    "schedule_source": "",
+    "autoscheduler": null,
+    "target": "x86-64-windows-avx-avx2-f16c-fma-sse41",
+    "autoschedule_ms": null,
+    "jit_ms": 114.17
+  }
+}

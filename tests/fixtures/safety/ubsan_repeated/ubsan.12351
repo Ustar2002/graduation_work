@@ -1,0 +1,172 @@
+kernel.c:10:15: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483644 + 4 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483641 + 7 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483638 + 10 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483635 + 13 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483632 + 16 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:12:9: runtime error: index 100003 out of bounds for type 'int [100003]'
+    #0 0x7f2a6c80e37a in prefix_sum kernel.c:12
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483629 + 19 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483626 + 22 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483623 + 25 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483620 + 28 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483617 + 31 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483614 + 34 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483611 + 37 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483608 + 40 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483605 + 43 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483602 + 46 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483599 + 49 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483596 + 52 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:12:9: runtime error: index 100003 out of bounds for type 'int [100003]'
+    #0 0x7f2a6c80e37a in prefix_sum kernel.c:12
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483593 + 55 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483590 + 58 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483587 + 61 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483584 + 64 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483581 + 67 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483578 + 70 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483575 + 73 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483572 + 76 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483569 + 79 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483566 + 82 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483563 + 85 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483560 + 88 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:12:9: runtime error: index 100003 out of bounds for type 'int [100003]'
+    #0 0x7f2a6c80e37a in prefix_sum kernel.c:12
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483557 + 91 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483554 + 94 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483551 + 97 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483548 + 100 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483545 + 103 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483542 + 106 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483539 + 109 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483536 + 112 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483533 + 115 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
+kernel.c:10:15: runtime error: signed integer overflow: 2147483530 + 118 cannot be represented in type 'int'
+    #0 0x7f2a6c80e2b4 in prefix_sum kernel.c:10
+    #1 0x7f2a6dc1bb15 in ffi_call_unix64 (/lib/x86_64-linux-gnu/libffi.so.8+0x7b15) (BuildId: 2e2d5a2c5d0a0f1c7ca1d2a3b0c2c8ef7a9d1b3c)
+
