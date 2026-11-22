@@ -19,6 +19,12 @@ sudo apt install build-essential git python3-venv python3-dev linux-tools-common
 
 `gcc`(OpenMP 포함), `taskset`, `cpupower` 가 필요하다. Python 은 3.12 이상이면 되고, 노트북과 같은 3.14 를 권장한다.
 
+선택: C 린트 도구(`plugins/lint/run_lint.py` 가 PATH 에서 찾는다). 없으면 `c_seq`·`c_openmp` 행의 `lint_*` 열이 NA 로 남고 run 은 계속된다.
+
+```bash
+sudo apt install cppcheck clang-tidy
+```
+
 ## 2. 저장소와 Python 환경
 
 ```bash
@@ -35,7 +41,10 @@ make venv SYSPY=python3.14
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.1 --no-modify-path
 ~/.cargo/bin/rustc --version
+make rust-setup CARGO=~/.cargo/bin/cargo
 ```
+
+`make rust-setup` 은 Rust 템플릿의 고정 크레이트(rayon)를 한 번 내려받는다(온라인; 이후 rust 빌드는 `--offline --locked`). 이것이 없으면 rust 가 들어간 run(`make dummy-m3`, `make dummy-all`, `LANGUAGES=…rust`)은 행을 쓰기 전에 exit 7 로 멈춘다. 하네스의 빌드는 cargo 를 PATH → `$CARGO_HOME/bin` → `~/.cargo/bin` 순으로 스스로 찾는다. cargo 를 직접 부르는 Makefile 타깃은 `make rust-setup` 하나이고, PATH 에 cargo 가 없으면 위처럼 `CARGO=~/.cargo/bin/cargo` 를 주거나 `source ~/.cargo/env` 한 셸에서 돌린다.
 
 ## 4. API 키
 
@@ -81,6 +90,8 @@ cp config/experiment.yaml config/experiment_desktop.yaml
 make tests
 make unittest
 ```
+
+통합된 하네스(새 언어·마이크로 조건·수정 루프·sanitizer·린트, `docs/decisions.md` 2026-11-23)를 이 장비에서 한 번에 확인하는 절차와 기대값은 `docs/linux_test_plan.md` 에 있다.
 
 ## 9. A/A 점검 → `bench_loop_fsync` 결정
 

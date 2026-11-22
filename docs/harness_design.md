@@ -4,6 +4,11 @@ v1 2026-11-03 → v2 2026-11-04 (5개 관점의 적대적 설계 리뷰 반영) 
 `CLAUDE.md`의 M1을 구현하는 모든 모듈이 지키는 인터페이스·규약이다. 이 문서와 `CLAUDE.md`가 충돌하면 `CLAUDE.md`가 우선하되 충돌은 `docs/decisions.md`에 적는다.
 구현자는 자기 파일 밖의 계약(함수 시그니처, JSON 키, CSV 열, CLI 옵션)을 바꾸지 않는다. 바꿔야 하면 이 문서를 먼저 고치고 `docs/decisions.md`에 날짜와 함께 적는다.
 
+> **이 문서의 범위(2026-11-23).** §0–§15 는 M1 시점의 계약, §16 은 M2 일반화, §17·§18 은 Tier 2·3 과제 계약이다. 그 뒤에 달라진 것은 아래 문서가 우선한다.
+> - 측정 규약: 대응 기준선은 별도 워커가 아니라 bench 워커 안에서 커널과 번갈아 재는 교차 측정이고(2026-11-09), 호출 친화도(2026-11-11)와 구현마다 서로 다른 시각에 도는 bench 라운드(2026-11-12)가 더해졌다. §8-7 의 대응 기준선 서술(`baseline/paired_sample_<lang>_<i>.json`)은 그 이전의 것이다. 상세는 `docs/protocol.md` 와 `docs/decisions.md` 의 그 날짜 항목.
+> - M3–M6 계층(언어 numba·halide_auto·halide_manual·rust, 마이크로 조건, 수정 루프, 성능 결정 요약, sanitizer, 린트 플러그인, 분석 확장, 개발용 점검 도구): `docs/harness_design_v3.md`. §8-6 의 워커 env 조건 `openmp=backend=="c" and lang.openmp` 은 언어 설정의 `omp_runtime` 으로 일반화됐다(기존 세 언어에서는 같은 값). 결정과 근거는 `docs/decisions.md` 2026-11-23.
+> - run.py 에서 이 문서의 §8 서술과 달라진 규칙(상세는 `docs/harness_design_v3.md` §9): 건너뜀 판정은 `raw_sha256` 에 더해 `--skip-bench` 로 쓴 통과 행을 bench 를 요청한 run 에서 다시 처리한다. 결과 문서를 한 번도 쓰지 못하고 끝난 워커는 반환 코드와 무관하게 harness_error(exit 5)다. 처리할 언어의 도구나 C 기준선 빌드에 필요한 컴파일러가 없거나 쓸 수 없으면 행을 쓰기 전에 exit 7 로 멈춘다. 행의 `run_id` 는 처리 중인 run 디렉터리 이름이다. drift·`model_served` 보정은 그 run 의 모든 `result.json` 행으로 하고, `--rebuild-csv` 는 `result.json` 이 없는 기존 CSV 행을 남긴다.
+
 ## 0. 실험 머신 실측 (2026-11-03/04)
 
 | 항목 | 값 |
